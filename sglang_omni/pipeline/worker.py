@@ -107,7 +107,7 @@ class Worker:
 
             # Put data and get metadata
             readable_op = self.stage.data_plane.put([descriptor])
-            readable_op.wait_for_completion()
+            await readable_op.wait_for_completion()
             metadata = readable_op.metadata()
 
             logger.debug(

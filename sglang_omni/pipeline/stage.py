@@ -204,7 +204,7 @@ class Stage:
         try:
             # Use empty descriptor list - SHMRelay will return data in the operation object
             read_op = self.data_plane.get(metadata=msg.shm_metadata, descriptors=[])
-            read_op.wait_for_completion()
+            await read_op.wait_for_completion()
 
             # Get data from the operation object
             data = read_op.data

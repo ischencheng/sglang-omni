@@ -13,7 +13,7 @@ class BaseReadOperation(ABC):
     """
 
     @abstractmethod
-    def wait_for_completion(self) -> None:
+    async def wait_for_completion(self) -> None:
         """Wait for the read operation to complete.
 
         This method should block (or be a no-op for synchronous operations)
@@ -43,7 +43,7 @@ class BaseReadableOperation(ABC):
         """
 
     @abstractmethod
-    def wait_for_completion(self) -> None:
+    async def wait_for_completion(self) -> None:
         """Wait for the remote read operation to complete.
 
         This method should block until the remote peer has finished reading

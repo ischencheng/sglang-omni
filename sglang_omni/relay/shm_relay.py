@@ -63,7 +63,7 @@ class SHMReadableOperation(BaseReadableOperation):
         """Return the SHM metadata for this operation."""
         return self._metadata
 
-    def wait_for_completion(self) -> None:
+    async def wait_for_completion(self) -> None:
         """Wait for the operation to complete. No-op for SHM (synchronous)."""
 
 
@@ -84,7 +84,7 @@ class SHMReadOperation(BaseReadOperation):
         """Return the size of the data in bytes."""
         return self._size
 
-    def wait_for_completion(self) -> None:
+    async def wait_for_completion(self) -> None:
         """Wait for the operation to complete. No-op for SHM (synchronous)."""
 
 
