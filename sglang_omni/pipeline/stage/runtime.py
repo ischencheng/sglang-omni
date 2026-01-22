@@ -24,9 +24,9 @@ from sglang_omni.relay.nixl import NixlRelay
 logger = logging.getLogger(__name__)
 
 
-# Type alias for get_next function
-# Returns: next_stage_name or None for END
-GetNextFn = Callable[[str, Any], str | None]
+# Type alias for get_next function.
+# Returns: next stage name, list of next stages (fan-out), or None for END.
+GetNextFn = Callable[[str, Any], str | list[str] | None]
 
 
 class Stage:
@@ -56,7 +56,7 @@ class Stage:
         Args:
             name: Stage name (unique identifier)
             get_next: Function to determine next stage
-                      (request_id, output) -> stage_name or None
+                      (request_id, output) -> stage_name, list of stage names, or None
             recv_endpoint: ZMQ endpoint to receive work
             coordinator_endpoint: ZMQ endpoint to send completions
             abort_endpoint: ZMQ endpoint for abort broadcasts
