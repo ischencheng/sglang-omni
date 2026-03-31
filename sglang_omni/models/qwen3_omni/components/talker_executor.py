@@ -172,7 +172,6 @@ class TalkerStreamingExecutor(Executor):
         self._payloads: dict[str, StagePayload] = {}
         self._states: dict[str, _TalkerRequestState] = {}
         self._aborted: set[str] = set()
-        self._engine_lock: asyncio.Lock = asyncio.Lock()
         self._tts_special_cache: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
@@ -239,12 +238,7 @@ class TalkerStreamingExecutor(Executor):
             task.add_done_callback(lambda _t: self._done.put_nowait(request_id))
             self._engine_feedback_mailbox.close(request_id)
             return
-        await self._engine_lock.acquire()
-        try:
-            await self._engine.add_request(request_id, engine_input)
-        except Exception:
-            self._engine_lock.release()
-            raise
+        await self._engine.add_request(request_id, engine_input)
 
         state = _TalkerRequestState(
             payload=payload,
@@ -255,15 +249,7 @@ class TalkerStreamingExecutor(Executor):
         bridge_task = asyncio.create_task(self._bridge_inbound(request_id))
         state.bridge_task = bridge_task
 
-        engine_lock = self._engine_lock
-
-        async def _run_and_release_lock():
-            try:
-                return await self._await_result(payload, bridge_task)
-            finally:
-                engine_lock.release()
-
-        result_task = asyncio.create_task(_run_and_release_lock())
+        result_task = asyncio.create_task(self._await_result(payload, bridge_task))
         self._tasks[request_id] = result_task
         result_task.add_done_callback(lambda _t: self._done.put_nowait(request_id))
 
