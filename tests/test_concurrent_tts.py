@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Regression test for issue #229: concurrent requests cause CUDA illegal memory access.
+"""Regression tests for issue #229: concurrent TTS requests cause CUDA crash.
 
-Root cause: _CodePredictorStreamingExecutor and _Code2WavStreamingExecutor both call
-run_in_executor on shared model instances without any lock, allowing two threads to
-run GPU inference simultaneously.
+Two bugs caused CUDA illegal memory access under concurrent TTS load:
 
-This test uses CPU-only mocks to detect the race condition without real GPUs:
-- A fake model sleeps briefly inside forward() to make overlap detectable.
-- Two requests are submitted concurrently.
-- On main (unfixed): the model is called from two threads simultaneously -> bug detected.
-- On fix branch:   a lock serializes calls  -> no overlap -> test passes.
+1. GPU inference race: _CodePredictorStreamingExecutor and _Code2WavStreamingExecutor
+   call run_in_executor on shared model instances without synchronization.
+   Fix: asyncio.Lock serializes GPU calls.
+
+2. Tree-cache prefix mismatch: sglang's radix tree cache reduces extend_input_len
+   for repeated prompts but input_embeds is not sliced accordingly, causing a shape
+   mismatch in the TVM store_cache kernel.
+   Fix: _rebuild_prefill_input_embeds slices input_embeds by prefix_indices.
+
+All tests use CPU-only mocks — no GPU required.
 """
 from __future__ import annotations
 
