@@ -28,8 +28,11 @@ from tests.utils import (
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MODEL_NAME = "qwen3-omni"
 
-IMAGE_PATH = str(Path(__file__).resolve().parents[2] / "data" / "cars.jpg")
-AUDIO_PATH = str(Path(__file__).resolve().parents[2] / "data" / "query_to_cars.wav")
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+IMAGE_PATH = str(DATA_DIR / "cars.jpg")
+AUDIO_PATH = str(DATA_DIR / "query_to_cars.wav")
+VIDEO_PATH = str(DATA_DIR / "draw.mp4")
+VIDEO_AUDIO_PATH = str(DATA_DIR / "query_to_draw.wav")
 TEXT_PROMPT = "How many cars are there in the picture?"
 
 STARTUP_TIMEOUT = 900
@@ -197,6 +200,87 @@ class TestSpeechMode:
         audio_b64 = message["audio"]["data"]
         audio_bytes = base64.b64decode(audio_b64)
         assert len(audio_bytes) > 0
+
+
+    @pytest.mark.docs
+    def test_video_audio(self, server: int, tmp_path: Path) -> None:
+        """Docs section: Speech Mode — Video and Audio Input.
+
+        Verifies:
+        1. Text output contains expected keywords about the video content.
+        2. Audio output can be transcribed by Whisper ASR and the transcription
+           is semantically consistent with the text output.
+        """
+        result = _post_chat(
+            server,
+            {
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": ""}],
+                "videos": [VIDEO_PATH],
+                "audios": [VIDEO_AUDIO_PATH],
+                "modalities": ["text", "audio"],
+                "max_tokens": 16,
+            },
+        )
+        assert "choices" in result
+        message = result["choices"][0]["message"]
+
+        # --- Text output: keyword detection ---
+        content = message.get("content", "")
+        assert isinstance(content, str)
+        assert len(content) > 0
+        content_lower = content.lower()
+        # draw.mp4 shows a girl drawing with a stylus/pen
+        assert any(
+            kw in content_lower for kw in ("draw", "stylus", "pen", "tablet", "girl")
+        ), f"Text output missing expected keywords about the video. Got: {content}"
+
+        # --- Audio output: Whisper ASR consistency check ---
+        assert "audio" in message, "Expected audio in response"
+        audio_b64 = message["audio"]["data"]
+        audio_bytes = base64.b64decode(audio_b64)
+        assert len(audio_bytes) > 0
+
+        wav_path = tmp_path / "video_audio_output.wav"
+        wav_path.write_bytes(audio_bytes)
+
+        transcription = _transcribe_with_whisper(str(wav_path))
+        assert len(transcription) > 0, "Whisper transcription is empty"
+
+        # Check that the transcription shares at least one significant word
+        # with the text output (semantic consistency).
+        text_words = set(content_lower.split())
+        transcript_words = set(transcription.lower().split())
+        # Remove common stop words for a more meaningful overlap check
+        stop_words = {"the", "a", "an", "is", "are", "in", "of", "and", "to", "it"}
+        text_significant = text_words - stop_words
+        transcript_significant = transcript_words - stop_words
+        overlap = text_significant & transcript_significant
+        assert len(overlap) > 0, (
+            f"Talker audio transcription has no semantic overlap with thinker text.\n"
+            f"Text output: {content}\n"
+            f"Transcription: {transcription}"
+        )
+
+
+def _transcribe_with_whisper(wav_path: str) -> str:
+    """Transcribe a WAV file using Whisper ASR."""
+    import soundfile as sf
+    from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+    processor = WhisperProcessor.from_pretrained("openai/whisper-tiny.en")
+    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny.en")
+
+    wav, sr = sf.read(wav_path)
+    if sr != 16000:
+        import librosa
+
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
+
+    inputs = processor(wav, sampling_rate=16000, return_tensors="pt")
+    predicted_ids = model.generate(inputs.input_features)
+    transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+    return transcription.strip()
 
 
 if __name__ == "__main__":
