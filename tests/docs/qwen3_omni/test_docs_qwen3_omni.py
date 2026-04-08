@@ -202,7 +202,6 @@ class TestSpeechMode:
         audio_bytes = base64.b64decode(audio_b64)
         assert len(audio_bytes) > 0
 
-
     @pytest.mark.docs
     def test_video_audio(self, server: int, tmp_path: Path) -> None:
         """Docs section: Speech Mode — Video and Audio Input.
@@ -251,8 +250,9 @@ class TestSpeechMode:
 
         # Thinker text tokens are the semantic anchor for talker audio,
         # so the transcription should match the text output closely.
-        from benchmarks.tasks.voice_clone import normalize_text
         from jiwer import wer as compute_wer
+
+        from benchmarks.tasks.voice_clone import normalize_text
 
         ref_norm = normalize_text(content, "en")
         hyp_norm = normalize_text(transcription, "en")
@@ -294,7 +294,9 @@ def _transcribe_with_whisper(asr: dict, wav_path: str) -> str:
 
     inputs = processor(wav, sampling_rate=16000, return_tensors="pt")
     input_features = inputs.input_features.to(device)
-    forced_decoder_ids = processor.get_decoder_prompt_ids(language="en", task="transcribe")
+    forced_decoder_ids = processor.get_decoder_prompt_ids(
+        language="en", task="transcribe"
+    )
     with torch.no_grad():
         predicted_ids = model.generate(
             input_features, forced_decoder_ids=forced_decoder_ids
