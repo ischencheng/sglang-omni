@@ -37,7 +37,7 @@ TEXT_PROMPT = "How many cars are there in the picture?"
 
 STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 120
-MAX_VIDEO_AUDIO_WER = 0.5
+MAX_VIDEO_AUDIO_WER = 0.1
 
 
 def _post_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict:
