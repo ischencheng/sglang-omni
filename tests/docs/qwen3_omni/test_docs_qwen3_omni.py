@@ -34,6 +34,7 @@ AUDIO_PATH = str(DATA_DIR / "query_to_cars.wav")
 VIDEO_PATH = str(DATA_DIR / "draw.mp4")
 VIDEO_AUDIO_PATH = str(DATA_DIR / "query_to_draw.wav")
 TEXT_PROMPT = "How many cars are there in the picture?"
+EXPECTED_VIDEO_KEYWORDS = ("draw", "stylus", "pen", "tablet", "girl")
 
 STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 120
@@ -232,7 +233,7 @@ class TestSpeechMode:
         content_lower = content.lower()
         # draw.mp4 shows a girl drawing with a stylus/pen
         assert any(
-            kw in content_lower for kw in ("draw", "stylus", "pen", "tablet", "girl")
+            kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS
         ), f"Text output missing expected keywords about the video. Got: {content}"
 
         # --- Audio output: Whisper ASR WER check ---
