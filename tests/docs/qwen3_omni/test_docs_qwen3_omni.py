@@ -37,6 +37,7 @@ TEXT_PROMPT = "How many cars are there in the picture?"
 
 STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 120
+MAX_VIDEO_AUDIO_WER = 0.5
 
 
 def _post_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict:
@@ -209,7 +210,7 @@ class TestSpeechMode:
         Verifies:
         1. Text output contains expected keywords about the video content.
         2. Audio output can be transcribed by Whisper ASR and the transcription
-           is semantically consistent with the text output.
+           matches the thinker text output (WER check).
         """
         result = _post_chat(
             server,
@@ -235,7 +236,7 @@ class TestSpeechMode:
             kw in content_lower for kw in ("draw", "stylus", "pen", "tablet", "girl")
         ), f"Text output missing expected keywords about the video. Got: {content}"
 
-        # --- Audio output: Whisper ASR consistency check ---
+        # --- Audio output: Whisper ASR WER check ---
         assert "audio" in message, "Expected audio in response"
         audio_b64 = message["audio"]["data"]
         audio_bytes = base64.b64decode(audio_b64)
@@ -244,32 +245,46 @@ class TestSpeechMode:
         wav_path = tmp_path / "video_audio_output.wav"
         wav_path.write_bytes(audio_bytes)
 
-        transcription = _transcribe_with_whisper(str(wav_path))
+        asr = _load_whisper_asr()
+        transcription = _transcribe_with_whisper(asr, str(wav_path))
         assert len(transcription) > 0, "Whisper transcription is empty"
 
-        # Check that the transcription shares at least one significant word
-        # with the text output (semantic consistency).
-        text_words = set(content_lower.split())
-        transcript_words = set(transcription.lower().split())
-        # Remove common stop words for a more meaningful overlap check
-        stop_words = {"the", "a", "an", "is", "are", "in", "of", "and", "to", "it"}
-        text_significant = text_words - stop_words
-        transcript_significant = transcript_words - stop_words
-        overlap = text_significant & transcript_significant
-        assert len(overlap) > 0, (
-            f"Talker audio transcription has no semantic overlap with thinker text.\n"
-            f"Text output: {content}\n"
-            f"Transcription: {transcription}"
+        # Thinker text tokens are the semantic anchor for talker audio,
+        # so the transcription should match the text output closely.
+        from benchmarks.tasks.voice_clone import normalize_text
+        from jiwer import wer as compute_wer
+
+        ref_norm = normalize_text(content, "en")
+        hyp_norm = normalize_text(transcription, "en")
+        word_error_rate = compute_wer(ref_norm, hyp_norm)
+        assert word_error_rate <= MAX_VIDEO_AUDIO_WER, (
+            f"Talker audio diverges from thinker text (WER={word_error_rate:.2f}).\n"
+            f"Text output (ref): {content!r} -> {ref_norm!r}\n"
+            f"Transcription (hyp): {transcription!r} -> {hyp_norm!r}"
         )
 
 
-def _transcribe_with_whisper(wav_path: str) -> str:
-    """Transcribe a WAV file using Whisper ASR."""
-    import soundfile as sf
+def _load_whisper_asr() -> dict:
+    """Load Whisper-large-v3 ASR model (matches CI pipeline)."""
+    import torch
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-    processor = WhisperProcessor.from_pretrained("openai/whisper-tiny.en")
-    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny.en")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+    model = WhisperForConditionalGeneration.from_pretrained(
+        "openai/whisper-large-v3"
+    ).to(device)
+    return {"processor": processor, "model": model, "device": device}
+
+
+def _transcribe_with_whisper(asr: dict, wav_path: str) -> str:
+    """Transcribe a WAV file using Whisper ASR."""
+    import soundfile as sf
+    import torch
+
+    processor = asr["processor"]
+    model = asr["model"]
+    device = asr["device"]
 
     wav, sr = sf.read(wav_path)
     if sr != 16000:
@@ -278,7 +293,12 @@ def _transcribe_with_whisper(wav_path: str) -> str:
         wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
 
     inputs = processor(wav, sampling_rate=16000, return_tensors="pt")
-    predicted_ids = model.generate(inputs.input_features)
+    input_features = inputs.input_features.to(device)
+    forced_decoder_ids = processor.get_decoder_prompt_ids(language="en", task="transcribe")
+    with torch.no_grad():
+        predicted_ids = model.generate(
+            input_features, forced_decoder_ids=forced_decoder_ids
+        )
     transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
     return transcription.strip()
 
