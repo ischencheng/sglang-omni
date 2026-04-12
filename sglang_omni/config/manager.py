@@ -6,6 +6,10 @@ from transformers import AutoConfig
 
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.utils.hf import (
+    architecture_from_hf_config,
+    try_resolve_arch_from_mistral_config,
+)
 
 
 class ConfigManager:
@@ -95,8 +99,27 @@ class ConfigManager:
         """Load config from model path, optionally selecting a variant."""
         import importlib
 
-        hf_config = AutoConfig.from_pretrained(model_path)
-        config_cls = PIPELINE_CONFIG_REGISTRY.get_config(hf_config.architectures[0])
+        arch = None
+
+        # 1) Hugging Face: local snapshot or hub id (hub ids have no local config.json)
+        try:
+            hf_config = AutoConfig.from_pretrained(model_path)
+            arch = architecture_from_hf_config(hf_config)
+        except Exception:
+            pass
+
+        # 2) Mistral-format params.json (e.g. Voxtral TTS) when HF config is absent
+        if arch is None:
+            arch = try_resolve_arch_from_mistral_config(model_path)
+
+        if arch is None:
+            raise ValueError(
+                f"Could not resolve model architecture for {model_path!r}. "
+                "Use a Hugging Face model id or a local directory with config.json "
+                "(architectures) or Mistral params.json (model_type, e.g. voxtral_tts)."
+            )
+
+        config_cls = PIPELINE_CONFIG_REGISTRY.get_config(arch)
 
         if variant:
             module = importlib.import_module(config_cls.__module__)

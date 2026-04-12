@@ -349,9 +349,12 @@ class S2ProSGLangTextModel(nn.Module):
         """Constrained semantic sampling + batched codebook generation."""
         bs = logits.shape[0]
 
-        # Constrained decode: mask non-semantic tokens
+        # Constrained decode: mask non-semantic tokens, then sample
         biased_logits = logits + self._semantic_bias
-        semantic_token = torch.argmax(biased_logits, dim=-1)  # [bs]
+        # Note (Xuesong): Following Non-CUDA Graph path with temperature=0.7 (fish-speech upstream default).
+        # reference: https://github.com/sgl-project/sglang-omni/pull/267
+        probs = torch.softmax(biased_logits / 0.7, dim=-1)
+        semantic_token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [bs]
 
         # Batched codebook loop
         self._audio_decoder.reset_caches()

@@ -89,6 +89,9 @@ The `compile_pipeline()` function transforms the declarative config into runtime
 
 The `PipelineRunner` manages the lifecycle — starting the coordinator and all stages, then waiting for completion or errors.
 
+For managed IPC startup, prefer `build_pipeline_runner()`. The lower-level
+`compile_pipeline()` helper rejects unmanaged IPC usage.
+
 ### Coordinator
 
 The `Coordinator` (`sglang_omni/pipeline/coordinator.py`) is the central request manager. It:
@@ -255,8 +258,8 @@ Preprocessing fans out to active encoders based on input modalities. The aggrega
 
 ```python
 from sglang_omni.config import (
-    ExecutorConfig, PipelineConfig, PipelineRunner,
-    StageConfig, compile_pipeline,
+    ExecutorConfig, PipelineConfig, StageConfig,
+    build_pipeline_runner,
 )
 
 config = PipelineConfig(
@@ -282,8 +285,7 @@ config = PipelineConfig(
     ],
 )
 
-coordinator, stages = compile_pipeline(config)
-runner = PipelineRunner(coordinator, stages)
+runner = build_pipeline_runner(config)
 ```
 
 ## Communication Layers

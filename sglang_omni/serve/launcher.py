@@ -36,7 +36,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from sglang_omni.client import Client
-from sglang_omni.config import PipelineConfig, PipelineRunner, compile_pipeline
+from sglang_omni.config import PipelineConfig, build_pipeline_runner
 from sglang_omni.profiler.profiler_control import ProfilerControlClient
 from sglang_omni.serve.openai_api import create_app
 
@@ -209,15 +209,16 @@ async def _run_server(
             await mp_runner.stop()
             logger.info(f"Pipeline stopped.")
     else:
-        coordinator, stages = compile_pipeline(pipeline_config)
-        stage_endpoints = _collect_stage_control_endpoints(stages)
-        runner = PipelineRunner(coordinator, stages)
+        runner = build_pipeline_runner(pipeline_config)
+        stage_endpoints = _collect_stage_control_endpoints(runner.stages)
         await runner.start()
-        logger.info(f"Pipeline '{pipeline_config.name}' started ({len(stages)} stages)")
+        logger.info(
+            f"Pipeline '{pipeline_config.name}' started ({len(runner.stages)} stages)"
+        )
 
         try:
             await _build_app_and_serve(
-                coordinator,
+                runner.coordinator,
                 model_name=resolved_name,
                 host=host,
                 port=port,

@@ -731,6 +731,17 @@ class BailingMoeV2ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(adapted)
 
         # ------------------------------------------------------------------
+        # Vision encoder + projector — NOT loaded here.
+        # The pipeline's IMAGE_STAGE (MingImageEncoder) handles vision
+        # encoding independently and injects pre-computed image_embeds
+        # via SGLang's _inject_multimodal_embeds().  Loading a duplicate
+        # copy here would waste ~1.2 GB of GPU memory.
+        # Vision/projector weights are silently skipped in load_weights().
+        # ------------------------------------------------------------------
+        self.visual = None
+        self.linear_proj = None
+
+        # ------------------------------------------------------------------
         # Patch token IDs on the HF config for SGLang runtime's
         # _inject_multimodal_embeds() which reads config.audio_token_id etc.
         # This runs during model loading, BEFORE SGLangModelScheduler reads
@@ -790,15 +801,27 @@ class BailingMoeV2ForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         """Load weights from Ming-Omni checkpoint.
 
-        Routes lm_head weights to self.lm_head and text model weights
-        to self.model. Skips non-LLM weights (audio encoder, vision, etc.).
+        Routes weights to sub-modules:
+        - lm_head.*       → self.lm_head
+        - vision.*, linear_proj.* → skipped (vision handled by IMAGE_STAGE)
+        - audio.*, linear_proj_audio.* → skipped (audio handled by AUDIO_STAGE)
+        - everything else → self.model (BailingMoeV2TextModel)
         """
         model_weights = []
         lm_head_params = dict(self.lm_head.named_parameters())
 
         for name, tensor in weights:
+            # Strip top-level "model." prefix from checkpoint names.
+            # Checkpoint uses "model.vision.*", "model.linear_proj.*", etc.
+            # but NOT "model.model.*" (that stripping is in TextModel).
+            stripped = name
+            if stripped.startswith("model.") and not stripped.startswith(
+                "model.model."
+            ):
+                stripped = stripped[len("model.") :]
+
             # Route lm_head weights
-            if name in ("lm_head.weight", "model.lm_head.weight"):
+            if stripped in ("lm_head.weight",) or name in ("model.lm_head.weight",):
                 param = lm_head_params.get("weight")
                 if param is not None:
                     weight_loader = getattr(
@@ -807,15 +830,24 @@ class BailingMoeV2ForCausalLM(nn.Module):
                     weight_loader(param, tensor)
                 continue
 
-            # Skip non-LLM weights that may be in the checkpoint
-            if any(
-                name.startswith(p)
-                for p in ("audio.", "linear_proj_audio.", "vision.", "linear_proj.")
+            # Skip vision encoder + projector weights (handled by IMAGE_STAGE)
+            if stripped.startswith("vision."):
+                continue
+            if stripped.startswith("linear_proj.") and not stripped.startswith(
+                "linear_proj_audio."
             ):
                 continue
 
+            # Skip audio weights (handled by AUDIO_STAGE)
+            if stripped.startswith("audio.") or stripped.startswith(
+                "linear_proj_audio."
+            ):
+                continue
+
+            # Pass original name to text model (it does its own prefix stripping)
             model_weights.append((name, tensor))
 
+        # Load text model weights
         self.model.load_weights(iter(model_weights))
 
         # Handle weight tying

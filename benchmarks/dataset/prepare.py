@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 DATASETS = {
     "seedtts": "zhaochenyang20/seed-tts-eval",
     "seedtts-mini": "zhaochenyang20/seed-tts-eval-mini",
-    "seedtts-50": "Ratish21/seed-tts-eval-50",
+    "seedtts-50": "xuesongye/seed-tts-eval-50",
+    "mmmu-ci-50": "zhaochenyang20/mmmu-ci-50",
 }
 
 

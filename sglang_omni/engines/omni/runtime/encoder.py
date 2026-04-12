@@ -440,6 +440,17 @@ class EncoderOutputProcessor:
 
         return outputs
 
+    def _slice_for_request(
+        self,
+        items: list | torch.Tensor,
+        sizes: list[int],
+        out_idx: int,
+    ) -> list | torch.Tensor:
+        """Slice per-item ``items`` into the chunk belonging to request ``out_idx``."""
+        offset = sum(sizes[:out_idx])
+        count = sizes[out_idx]
+        return items[offset : offset + count]
+
     def _extract_value_for_request(
         self,
         key: str,
@@ -470,13 +481,32 @@ class EncoderOutputProcessor:
 
         # Handle count keys
         if key in {"image_token_counts", "audio_output_lengths", "video_token_counts"}:
-            if value.dim() == 1 and value.shape[0] == len(active_indices):
-                return value[out_idx : out_idx + 1]
+            for mod_name, config in self.modality_configs.items():
+                if config.count_key == key:
+                    sizes = modality_sizes[mod_name]
+                    return self._slice_for_request(value, sizes, out_idx)
             return value
 
-        # Handle embeddings
+        # Note(Yifei):
+        # Handle embeddings. ``embed_splits`` is built solely by
+        # ``_split_embeddings`` from ``self.modality_configs``, so any key here
+        # is guaranteed to match exactly one config.embed_key below.
         if key in embed_splits:
-            return embed_splits[key][out_idx]
+            splits = embed_splits[key]
+            for mod_name, config in self.modality_configs.items():
+                if config.embed_key == key:
+                    sizes = modality_sizes[mod_name]
+                    # Note(Yifei):
+                    # Precondition: image/audio live in separate encoder stages
+                    # and InputPreparer enforces homogeneous key sets across a
+                    # batch, so whenever ``key`` is in ``embed_splits`` every
+                    # active request must contribute at least one item.
+                    assert sizes[out_idx] > 0, (
+                        f"empty {mod_name} slice for active request {out_idx} "
+                        f"despite {key} present in embed_splits"
+                    )
+                    chunk = self._slice_for_request(splits, sizes, out_idx)
+                    return chunk[0] if len(chunk) == 1 else torch.cat(chunk)
 
         # Handle generic batched tensors
         if value.shape[0] == len(active_indices):
