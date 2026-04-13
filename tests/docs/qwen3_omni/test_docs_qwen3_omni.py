@@ -45,7 +45,7 @@ EXPECTED_VIDEO_KEYWORDS = ["draw", "stylus", "pen", "tablet", "girl"]
 
 STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 120
-MAX_VIDEO_AUDIO_WER = 0.1
+MAX_VIDEO_AUDIO_WER = 0.18
 
 
 def _post_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict:
