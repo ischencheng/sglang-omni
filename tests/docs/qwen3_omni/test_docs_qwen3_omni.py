@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import torch
 from jiwer import process_words
 
 from benchmarks.tasks.voice_clone import load_asr_model, normalize_text, transcribe
@@ -81,21 +82,21 @@ def _curl_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict
         json.dumps(payload),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
-    assert result.returncode == 0, (
-        f"curl failed (rc={result.returncode}): {result.stderr}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"curl failed (rc={result.returncode}): {result.stderr}"
     return json.loads(result.stdout)
 
 
 def _send_chat(port: int, payload: dict, client: str) -> dict:
-    return _post_chat(port, payload) if client == "python" else _curl_chat(port, payload)
+    return (
+        _post_chat(port, payload) if client == "python" else _curl_chat(port, payload)
+    )
 
 
 @pytest.fixture(scope="session")
 def whisper_asr() -> dict:
     """Session-scoped Whisper-large-v3 — load once, share across all WER tests."""
-    import torch
-
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     asr = load_asr_model("en", device)
     return {"asr": asr, "device": device}
@@ -275,9 +276,9 @@ class TestSpeechMode:
         content = message.get("content", "")
         assert isinstance(content, str) and len(content) > 0
         content_lower = content.lower()
-        assert any(kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS), (
-            f"Text output missing expected keywords about the video. Got: {content}"
-        )
+        assert any(
+            kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS
+        ), f"Text output missing expected keywords about the video. Got: {content}"
 
         assert "audio" in message, "Expected audio in response"
         audio_bytes = base64.b64decode(message["audio"]["data"])
