@@ -2,7 +2,9 @@
 """Tests for Qwen3-Omni documentation examples.
 
 Every test replicates an API call from `docs/basic_usage/qwen3_omni.md`
-so documentation can never silently go stale.
+so documentation can never silently go stale. Each section is exercised
+twice — once via the Python `requests` client and once via `curl` — so
+both code blocks in the docs stay accurate.
 
 Usage:
     pytest tests/docs/qwen3_omni/test_docs_qwen3_omni.py -s -x
@@ -11,12 +13,17 @@ Usage:
 from __future__ import annotations
 
 import base64
+import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import requests
+from jiwer import process_words
 
+from benchmarks.tasks.voice_clone import load_asr_model, normalize_text, transcribe
 from tests.utils import (
     disable_proxy,
     find_free_port,
@@ -28,12 +35,12 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MODEL_NAME = "qwen3-omni"
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
-IMAGE_PATH = str(DATA_DIR / "cars.jpg")
-AUDIO_PATH = str(DATA_DIR / "query_to_cars.wav")
-VIDEO_PATH = str(DATA_DIR / "draw.mp4")
-VIDEO_AUDIO_PATH = str(DATA_DIR / "query_to_draw.wav")
+IMAGE_PATH = DATA_DIR / "cars.jpg"
+AUDIO_PATH = DATA_DIR / "query_to_cars.wav"
+VIDEO_PATH = DATA_DIR / "draw.mp4"
+VIDEO_AUDIO_PATH = DATA_DIR / "query_to_draw.wav"
 TEXT_PROMPT = "How many cars are there in the picture?"
-EXPECTED_VIDEO_KEYWORDS = ("draw", "stylus", "pen", "tablet", "girl")
+EXPECTED_VIDEO_KEYWORDS = ["draw", "stylus", "pen", "tablet", "girl"]
 
 STARTUP_TIMEOUT = 900
 REQUEST_TIMEOUT = 120
@@ -41,7 +48,7 @@ MAX_VIDEO_AUDIO_WER = 0.1
 
 
 def _post_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict:
-    """POST to /v1/chat/completions and return the parsed JSON response."""
+    """POST to /v1/chat/completions via Python requests."""
     with disable_proxy():
         resp = requests.post(
             f"http://localhost:{port}/v1/chat/completions",
@@ -50,6 +57,48 @@ def _post_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict
         )
     resp.raise_for_status()
     return resp.json()
+
+
+def _curl_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict:
+    """POST to /v1/chat/completions via curl (mirrors the cURL snippets in docs)."""
+    curl = shutil.which("curl")
+    if curl is None:
+        pytest.skip("curl binary not available")
+    cmd = [
+        curl,
+        "-sS",
+        "--fail",
+        "--noproxy",
+        "*",
+        "--max-time",
+        str(timeout),
+        "-X",
+        "POST",
+        f"http://localhost:{port}/v1/chat/completions",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        json.dumps(payload),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+    assert result.returncode == 0, (
+        f"curl failed (rc={result.returncode}): {result.stderr}"
+    )
+    return json.loads(result.stdout)
+
+
+def _send_chat(port: int, payload: dict, client: str) -> dict:
+    return _post_chat(port, payload) if client == "python" else _curl_chat(port, payload)
+
+
+@pytest.fixture(scope="session")
+def whisper_asr() -> dict:
+    """Session-scoped Whisper-large-v3 — load once, share across all WER tests."""
+    import torch
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    asr = load_asr_model("en", device)
+    return {"asr": asr, "device": device}
 
 
 class TestTextOnlyMode:
@@ -85,41 +134,37 @@ class TestTextOnlyMode:
         assert "healthy" in resp.text
 
     @pytest.mark.docs
-    def test_image_text(self, server: int) -> None:
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_image_text(self, server: int, client: str) -> None:
         """Docs section: Text-Only Mode — Image and Text Input."""
-        result = _post_chat(
-            server,
-            {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": TEXT_PROMPT}],
-                "images": [IMAGE_PATH],
-                "modalities": ["text"],
-                "max_tokens": 16,
-            },
-        )
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": TEXT_PROMPT}],
+            "images": [str(IMAGE_PATH)],
+            "modalities": ["text"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
         assert "choices" in result
         content = result["choices"][0]["message"]["content"]
-        assert isinstance(content, str)
-        assert len(content) > 0
+        assert isinstance(content, str) and len(content) > 0
 
     @pytest.mark.docs
-    def test_audio_image(self, server: int) -> None:
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_audio_image(self, server: int, client: str) -> None:
         """Docs section: Text-Only Mode — Audio and Image Input."""
-        result = _post_chat(
-            server,
-            {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": ""}],
-                "images": [IMAGE_PATH],
-                "audios": [AUDIO_PATH],
-                "modalities": ["text"],
-                "max_tokens": 16,
-            },
-        )
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": ""}],
+            "images": [str(IMAGE_PATH)],
+            "audios": [str(AUDIO_PATH)],
+            "modalities": ["text"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
         assert "choices" in result
         content = result["choices"][0]["message"]["content"]
-        assert isinstance(content, str)
-        assert len(content) > 0
+        assert isinstance(content, str) and len(content) > 0
 
 
 class TestSpeechMode:
@@ -160,18 +205,17 @@ class TestSpeechMode:
         assert "healthy" in resp.text
 
     @pytest.mark.docs
-    def test_image_text(self, server: int) -> None:
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_image_text(self, server: int, client: str) -> None:
         """Docs section: Speech Mode — Image and Text Input."""
-        result = _post_chat(
-            server,
-            {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": TEXT_PROMPT}],
-                "images": [IMAGE_PATH],
-                "modalities": ["text", "audio"],
-                "max_tokens": 16,
-            },
-        )
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": TEXT_PROMPT}],
+            "images": [str(IMAGE_PATH)],
+            "modalities": ["text", "audio"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
         assert "choices" in result
         message = result["choices"][0]["message"]
 
@@ -179,24 +223,22 @@ class TestSpeechMode:
         assert len(message["content"]) > 0
 
         assert "audio" in message
-        audio_b64 = message["audio"]["data"]
-        audio_bytes = base64.b64decode(audio_b64)
+        audio_bytes = base64.b64decode(message["audio"]["data"])
         assert len(audio_bytes) > 0
 
     @pytest.mark.docs
-    def test_audio_image(self, server: int) -> None:
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_audio_image(self, server: int, client: str) -> None:
         """Docs section: Speech Mode — Audio and Image Input."""
-        result = _post_chat(
-            server,
-            {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": ""}],
-                "images": [IMAGE_PATH],
-                "audios": [AUDIO_PATH],
-                "modalities": ["text", "audio"],
-                "max_tokens": 16,
-            },
-        )
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": ""}],
+            "images": [str(IMAGE_PATH)],
+            "audios": [str(AUDIO_PATH)],
+            "modalities": ["text", "audio"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
         assert "choices" in result
         message = result["choices"][0]["message"]
 
@@ -204,111 +246,60 @@ class TestSpeechMode:
         assert len(message["content"]) > 0
 
         assert "audio" in message
-        audio_b64 = message["audio"]["data"]
-        audio_bytes = base64.b64decode(audio_b64)
+        audio_bytes = base64.b64decode(message["audio"]["data"])
         assert len(audio_bytes) > 0
 
     @pytest.mark.docs
-    def test_video_audio(self, server: int, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("client", ["python", "curl"])
+    def test_video_audio(
+        self, server: int, client: str, tmp_path: Path, whisper_asr: dict
+    ) -> None:
         """Docs section: Speech Mode — Video and Audio Input.
 
-        Verifies:
-        1. Text output contains expected keywords about the video content.
-        2. Audio output can be transcribed by Whisper ASR and the transcription
-           matches the thinker text output (WER check).
+        Verifies the thinker text contains expected keywords about the
+        video and the talker audio (WER-compared against the thinker text
+        via Whisper) stays within MAX_VIDEO_AUDIO_WER.
         """
-        result = _post_chat(
-            server,
-            {
-                "model": MODEL_NAME,
-                "messages": [{"role": "user", "content": ""}],
-                "videos": [VIDEO_PATH],
-                "audios": [VIDEO_AUDIO_PATH],
-                "modalities": ["text", "audio"],
-                "max_tokens": 16,
-            },
-        )
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": ""}],
+            "videos": [str(VIDEO_PATH)],
+            "audios": [str(VIDEO_AUDIO_PATH)],
+            "modalities": ["text", "audio"],
+            "max_tokens": 16,
+        }
+        result = _send_chat(server, payload, client)
         assert "choices" in result
         message = result["choices"][0]["message"]
 
-        # --- Text output: keyword detection ---
         content = message.get("content", "")
-        assert isinstance(content, str)
-        assert len(content) > 0
+        assert isinstance(content, str) and len(content) > 0
         content_lower = content.lower()
-        # draw.mp4 shows a girl drawing with a stylus/pen
-        assert any(
-            kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS
-        ), f"Text output missing expected keywords about the video. Got: {content}"
+        assert any(kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS), (
+            f"Text output missing expected keywords about the video. Got: {content}"
+        )
 
-        # --- Audio output: Whisper ASR WER check ---
         assert "audio" in message, "Expected audio in response"
-        audio_b64 = message["audio"]["data"]
-        audio_bytes = base64.b64decode(audio_b64)
+        audio_bytes = base64.b64decode(message["audio"]["data"])
         assert len(audio_bytes) > 0
 
-        wav_path = tmp_path / "video_audio_output.wav"
+        wav_path = tmp_path / f"video_audio_output_{client}.wav"
         wav_path.write_bytes(audio_bytes)
 
-        asr = _load_whisper_asr()
-        transcription = _transcribe_with_whisper(asr, str(wav_path))
+        transcription = transcribe(
+            whisper_asr["asr"], str(wav_path), "en", whisper_asr["device"]
+        )
         assert len(transcription) > 0, "Whisper transcription is empty"
-
-        # Thinker text tokens are the semantic anchor for talker audio,
-        # so the transcription should match the text output closely.
-        from jiwer import wer as compute_wer
-
-        from benchmarks.tasks.voice_clone import normalize_text
 
         ref_norm = normalize_text(content, "en")
         hyp_norm = normalize_text(transcription, "en")
-        word_error_rate = compute_wer(ref_norm, hyp_norm)
+        assert ref_norm, "Empty reference after normalization"
+        word_error_rate = process_words(ref_norm, hyp_norm).wer
         assert word_error_rate <= MAX_VIDEO_AUDIO_WER, (
             f"Talker audio diverges from thinker text (WER={word_error_rate:.2f}).\n"
             f"Text output (ref): {content!r} -> {ref_norm!r}\n"
             f"Transcription (hyp): {transcription!r} -> {hyp_norm!r}"
         )
-
-
-def _load_whisper_asr() -> dict:
-    """Load Whisper-large-v3 ASR model (matches CI pipeline)."""
-    import torch
-    from transformers import WhisperForConditionalGeneration, WhisperProcessor
-
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-    model = WhisperForConditionalGeneration.from_pretrained(
-        "openai/whisper-large-v3"
-    ).to(device)
-    return {"processor": processor, "model": model, "device": device}
-
-
-def _transcribe_with_whisper(asr: dict, wav_path: str) -> str:
-    """Transcribe a WAV file using Whisper ASR."""
-    import soundfile as sf
-    import torch
-
-    processor = asr["processor"]
-    model = asr["model"]
-    device = asr["device"]
-
-    wav, sr = sf.read(wav_path)
-    if sr != 16000:
-        import librosa
-
-        wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
-
-    inputs = processor(wav, sampling_rate=16000, return_tensors="pt")
-    input_features = inputs.input_features.to(device)
-    forced_decoder_ids = processor.get_decoder_prompt_ids(
-        language="en", task="transcribe"
-    )
-    with torch.no_grad():
-        predicted_ids = model.generate(
-            input_features, forced_decoder_ids=forced_decoder_ids
-        )
-    transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-    return transcription.strip()
 
 
 if __name__ == "__main__":
