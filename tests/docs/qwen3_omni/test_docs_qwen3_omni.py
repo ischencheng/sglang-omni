@@ -265,6 +265,8 @@ class TestSpeechMode:
         video and the talker audio (WER-compared against the thinker text
         via Whisper) stays within MAX_VIDEO_AUDIO_WER.
         """
+        assert VIDEO_PATH.exists(), f"Test video not found: {VIDEO_PATH}"
+        assert VIDEO_AUDIO_PATH.exists(), f"Test audio not found: {VIDEO_AUDIO_PATH}"
         payload = {
             "model": MODEL_NAME,
             "messages": [{"role": "user", "content": ""}],
