@@ -274,6 +274,7 @@ class TestSpeechMode:
             "audios": [str(VIDEO_AUDIO_PATH)],
             "modalities": ["text", "audio"],
             "max_tokens": 16,
+            "temperature": 0.0,
         }
         result = _send_chat(server, payload, client)
         assert "choices" in result
