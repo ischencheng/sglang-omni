@@ -148,7 +148,8 @@ class TestTextOnlyMode:
         result = _send_chat(server, payload, client)
         assert "choices" in result
         content = result["choices"][0]["message"]["content"]
-        assert isinstance(content, str) and len(content) > 0
+        assert isinstance(content, str)
+        assert len(content) > 0
 
     @pytest.mark.docs
     @pytest.mark.parametrize("client", ["python", "curl"])
@@ -165,7 +166,8 @@ class TestTextOnlyMode:
         result = _send_chat(server, payload, client)
         assert "choices" in result
         content = result["choices"][0]["message"]["content"]
-        assert isinstance(content, str) and len(content) > 0
+        assert isinstance(content, str)
+        assert len(content) > 0
 
 
 class TestSpeechMode:
@@ -224,7 +226,8 @@ class TestSpeechMode:
         assert len(message["content"]) > 0
 
         assert "audio" in message
-        audio_bytes = base64.b64decode(message["audio"]["data"])
+        audio_b64 = message["audio"]["data"]
+        audio_bytes = base64.b64decode(audio_b64)
         assert len(audio_bytes) > 0
 
     @pytest.mark.docs
@@ -247,7 +250,8 @@ class TestSpeechMode:
         assert len(message["content"]) > 0
 
         assert "audio" in message
-        audio_bytes = base64.b64decode(message["audio"]["data"])
+        audio_b64 = message["audio"]["data"]
+        audio_bytes = base64.b64decode(audio_b64)
         assert len(audio_bytes) > 0
 
     @pytest.mark.docs
@@ -274,14 +278,16 @@ class TestSpeechMode:
         message = result["choices"][0]["message"]
 
         content = message.get("content", "")
-        assert isinstance(content, str) and len(content) > 0
+        assert isinstance(content, str)
+        assert len(content) > 0
         content_lower = content.lower()
         assert any(
             kw in content_lower for kw in EXPECTED_VIDEO_KEYWORDS
         ), f"Text output missing expected keywords about the video. Got: {content}"
 
         assert "audio" in message, "Expected audio in response"
-        audio_bytes = base64.b64decode(message["audio"]["data"])
+        audio_b64 = message["audio"]["data"]
+        audio_bytes = base64.b64decode(audio_b64)
         assert len(audio_bytes) > 0
 
         wav_path = tmp_path / f"video_audio_output_{client}.wav"
