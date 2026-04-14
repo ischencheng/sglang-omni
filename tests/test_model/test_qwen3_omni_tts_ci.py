@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +44,8 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 
 CONCURRENCY = 1
 MAX_SAMPLES = 10
+# Also used in .github/workflows/test-qwen3-omni-ci.yaml — keep in sync.
+DATASET_CACHE_ENV = "SGLANG_SEEDTTS_MINI_DIR"
 
 STARTUP_TIMEOUT = 900
 WER_TIMEOUT = 600
@@ -204,8 +207,12 @@ def _run_wer_transcribe(
 
 @pytest.fixture(scope="module")
 def dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("seed_tts_eval") / "data"
-    download_dataset(DATASETS["seedtts-mini"], str(root))
+    override_dir = os.environ.get(DATASET_CACHE_ENV)
+    if override_dir:
+        root = Path(override_dir).expanduser()
+    else:
+        root = tmp_path_factory.mktemp("seed_tts_eval") / "data"
+    download_dataset(DATASETS["seedtts-mini"], str(root), quiet=True)
     return root
 
 
