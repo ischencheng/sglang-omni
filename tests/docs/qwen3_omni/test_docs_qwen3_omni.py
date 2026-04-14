@@ -28,6 +28,7 @@ from benchmarks.tasks.voice_clone import load_asr_model, normalize_text, transcr
 from tests.utils import (
     disable_proxy,
     find_free_port,
+    no_proxy_env,
     start_server_from_cmd,
     stop_server,
 )
@@ -81,7 +82,10 @@ def _curl_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict
         "-d",
         json.dumps(payload),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+    # Extra seconds for curl to exit and flush output after --max-time fires
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout + 10, env=no_proxy_env()
+    )
     assert (
         result.returncode == 0
     ), f"curl failed (rc={result.returncode}): {result.stderr}"
@@ -89,9 +93,12 @@ def _curl_chat(port: int, payload: dict, timeout: int = REQUEST_TIMEOUT) -> dict
 
 
 def _send_chat(port: int, payload: dict, client: str) -> dict:
-    return (
-        _post_chat(port, payload) if client == "python" else _curl_chat(port, payload)
-    )
+    if client == "python":
+        return _post_chat(port, payload)
+    elif client == "curl":
+        return _curl_chat(port, payload)
+    else:
+        raise ValueError(f"Unknown client type: {client!r}")
 
 
 @pytest.fixture(scope="session")

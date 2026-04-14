@@ -16,8 +16,6 @@ uv venv .venv -p 3.12 && source .venv/bin/activate
 uv pip install -e "."
 ```
 
-> **Note:** Set `"content": ""` (empty string) on the user message when there is no text input.
-
 ## Text-Only Mode
 
 Text-only mode runs the thinker pipeline on a single GPU. It accepts multi-modal input (text, image, audio) and produces text output only.
@@ -72,6 +70,8 @@ print(result["choices"][0]["message"]["content"])
 ### Audio and Image Input
 
 Send an audio file together with an image. The audio contains the spoken question ("How many cars are there in the picture?") and the model answers based on both inputs.
+
+> **Note:** Set `"content": ""` (empty string) on the user message when all semantic content comes from audio, video, or images rather than text.
 
 **cURL**
 
