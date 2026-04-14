@@ -24,8 +24,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: ./.github/actions/s2pro-setup
+      - uses: ./.github/actions/omni-setup
         with:
+          venv-name: omni-s2pro
+          pip-extras: s2pro,dev
           install-deps: "true"
 
       - name: Run docs tests
@@ -61,7 +63,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: ./.github/actions/s2pro-setup
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-s2pro
 
       - name: Run benchmark stage
         shell: bash
@@ -110,7 +114,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: ./.github/actions/s2pro-setup
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-s2pro
 
       - name: Run benchmark stage
         shell: bash
@@ -159,7 +165,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: ./.github/actions/s2pro-setup
+      - uses: ./.github/actions/omni-setup
+        with:
+          venv-name: omni-s2pro
 
       - name: Download stage 1 artifact
         uses: actions/download-artifact@v4
