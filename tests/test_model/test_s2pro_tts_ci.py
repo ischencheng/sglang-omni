@@ -152,7 +152,7 @@ _VC_STREAM_P95 = {
     },
     8: {
         "throughput_qps": 0.31,
-        "tok_per_s_agg": 8.9,
+        "tok_per_s_agg": 8.5,
         "latency_mean_s": 22.7,
         "rtf_mean": 5.89,
     },
