@@ -135,5 +135,12 @@ Download helpers live in `benchmarks/dataset/prepare.py`:
 python -m benchmarks.dataset.prepare --dataset seedtts       # full SeedTTS
 python -m benchmarks.dataset.prepare --dataset seedtts-mini  # smoke-test subset
 python -m benchmarks.dataset.prepare --dataset seedtts-50    # 50-sample subset
+python -m benchmarks.dataset.prepare --dataset mmmu          # full MMMU (30 subjects)
 python -m benchmarks.dataset.prepare --dataset mmmu-ci-50    # MMMU CI subset
+python -m benchmarks.dataset.prepare --dataset mmsu          # full MMSU (ddwang2000/MMSU)
 ```
+
+SeedTTS datasets are materialized into `./seedtts_testset/` (override with
+`--local-dir`).  MMMU/MMSU datasets are pre-warmed into the default
+HuggingFace cache and consumed via `datasets.load_dataset(repo_id)`, so
+`--local-dir` is a no-op for them.

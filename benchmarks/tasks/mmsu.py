@@ -129,14 +129,15 @@ def _build_result_from_response(
         return result
 
     audio_obj = message.get("audio")
-    if not isinstance(audio_obj, dict) or not audio_obj.get("data"):
-        result.error = "No audio in response"
-        return result
+    if isinstance(audio_obj, dict) and audio_obj.get("data"):
+        wav_bytes = base64.b64decode(audio_obj["data"])
+        result.audio_duration_s = get_wav_duration(wav_bytes)
+        result.wav_path = _save_response_audio(wav_bytes, sample_id, save_audio_dir)
 
-    wav_bytes = base64.b64decode(audio_obj["data"])
-    result.audio_duration_s = get_wav_duration(wav_bytes)
-    result.wav_path = _save_response_audio(wav_bytes, sample_id, save_audio_dir)
-    result.is_success = bool(result.text or result.audio_duration_s > 0)
+    if result.text or result.audio_duration_s > 0:
+        result.is_success = True
+    else:
+        result.error = "Empty response"
     return result
 
 
@@ -358,6 +359,10 @@ def print_mmsu_summary(
         if speed_metrics.get("rtf_mean") is not None:
             print(f"  RTF mean:         {speed_metrics.get('rtf_mean', 0):.4f}")
         print(f"  Throughput:       {speed_metrics.get('throughput_qps', 0):.2f} req/s")
+        audio_returned = speed_metrics.get("audio_returned")
+        audio_expected = speed_metrics.get("audio_expected")
+        if audio_expected:
+            print(f"  Audio returned:   {audio_returned}/{audio_expected}")
     print("=" * 60)
 
 

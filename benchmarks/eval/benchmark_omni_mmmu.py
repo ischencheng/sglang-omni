@@ -20,7 +20,35 @@ Usage:
 
     python benchmarks/eval/benchmark_omni_mmmu.py \
         --model qwen3-omni --port 8000 --max-samples 5 --enable-audio --max-tokens 50
+
+
+H200 Full-Set Reference Results
+
+Reproducibility references for the FULL eval set — NOT CI thresholds.
+CI runs on a subset and has its own thresholds elsewhere (see tasks/*.py).
+
+Benchmark: MMMU     |  Dataset: MMMU_val (900 samples, all 30 subjects)
+Hardware:  1 x H200 (default; non-H200 sources are tagged in Source column)
+Last verified: 2026-04-18
+
+Accuracy (summary)
+
+| Model      | Config             | accuracy | correct | failed | mc_fallback | Source                                                 |
+| ---------- | ------------------ | -------- | ------- | ------ | ----------- | ------------------------------------------------------ |
+| Qwen3-Omni | enable_audio=False | 67.22%   | 605/900 | 0      | 21          | PR #316 [H200, full-set, c=8, max_tokens=2048]         |
+| Qwen3-Omni | enable_audio=True  | 46.00%   | 23/50   | 15     | 0           | PR #316 [H200, 50-sample subset, c=1, max_tokens=2048] |
+
+Note (Xuesong): full 900 not runfor enable_audio = True — Issue #276 talker is c=1 only and ~2 min/sample (~30 h for full set). 15/50 requests failed
+ in audio generation (Issue #276); on the 35 completed requests accuracy = 65.7%.
+
+Speed (speed)
+
+| Model      | Config             | latency_mean_s | latency_p95_s | throughput_qps | tok_per_s_mean | tok_per_s_agg | Source                                                     |
+| ---------- | ------------------ | -------------- | ------------- | -------------- | -------------- | ------------- | ---------------------------------------------------------- |
+| Qwen3-Omni | enable_audio=False | 25.70          | 96.38         | 0.308          | 19.6           | 19.9          | PR #316 [H200, full-set, c=8, max_tokens=2048]             |
+| Qwen3-Omni | enable_audio=True  | 123.13         | 221.52        | 0.004          | 2.2            | 2.1           | PR #316 [H200, **50-sample subset**, c=1, max_tokens=2048] |
 """
+
 
 from __future__ import annotations
 
