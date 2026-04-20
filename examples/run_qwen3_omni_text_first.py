@@ -27,8 +27,7 @@ def parse_args() -> argparse.Namespace:
         help="Hugging Face model id",
     )
     parser.add_argument("--prompt", type=str, default="Describe this input.")
-    parser.add_argument("--dtype", type=str, default="bfloat16")
-    parser.add_argument("--thinker-max-seq-len", type=int, default=8192)
+    parser.add_argument("--thinker-max-seq-len", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--image-path", type=str, default=None)
@@ -40,14 +39,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--relay-backend", type=str, default="nixl", choices=["nixl", "shm"]
     )
+    parser.add_argument(
+        "--cpu-offload-gb",
+        type=int,
+        default=0,
+        help="GB of model weights to offload to CPU",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help="Fraction of GPU memory for KV cache",
+    )
     return parser.parse_args()
 
 
 async def main_async(args: argparse.Namespace) -> None:
+    overrides = {}
+    if args.cpu_offload_gb:
+        overrides["cpu_offload_gb"] = args.cpu_offload_gb
+    if args.mem_fraction_static is not None:
+        overrides["mem_fraction_static"] = args.mem_fraction_static
+
     config = Qwen3OmniPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
+        server_args_overrides=overrides or None,
     )
+
+    # Override thinker_max_seq_len in stage executor args if provided
+    if args.thinker_max_seq_len is not None:
+        for stage in config.stages:
+            if stage.name == "thinker":
+                if stage.executor.args is None:
+                    stage.executor.args = {}
+                stage.executor.args["thinker_max_seq_len"] = args.thinker_max_seq_len
+
     runner = build_pipeline_runner(config)
 
     await runner.start()

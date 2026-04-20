@@ -75,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--cpu-offload-gb", type=float, default=0)
     parser.add_argument("--mem-fraction-static", type=float, default=None)
+    parser.add_argument(
+        "--tp-size", type=int, default=1, help="Tensor parallel size for thinker"
+    )
     return parser.parse_args()
 
 
@@ -89,6 +92,8 @@ async def main_async(args: argparse.Namespace) -> None:
     }
 
     overrides = {}
+    if args.tp_size > 1:
+        overrides["tp_size"] = args.tp_size
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
     if args.mem_fraction_static is not None:
