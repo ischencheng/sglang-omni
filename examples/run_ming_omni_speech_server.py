@@ -64,6 +64,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--voice", type=str, default="DB30", help="Voice ID for the talker"
     )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for the thinker stage. "
+            "If omitted, SGLang chooses automatically."
+        ),
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -91,6 +100,15 @@ async def main_async(args: argparse.Namespace) -> None:
         relay_backend=args.relay_backend,
         gpu_placement=gpu_placement,
     )
+    if args.mem_fraction_static is not None:
+        if not 0.0 < args.mem_fraction_static < 1.0:
+            raise ValueError(
+                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
+            )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={"mem_fraction_static": args.mem_fraction_static},
+        )
 
     runner = MultiProcessPipelineRunner(config)
     logger.info("Starting Ming-Omni speech pipeline (multiprocess)...")

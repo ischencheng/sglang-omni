@@ -56,8 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mem-fraction-static",
         type=float,
-        default=0.80,
-        help="Fraction of GPU memory for KV cache (default: 0.80)",
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for the thinker stage. "
+            "If omitted, SGLang chooses automatically."
+        ),
     )
     parser.add_argument(
         "--relay-backend", type=str, default="shm", choices=["nixl", "shm"]
@@ -69,14 +72,22 @@ async def main_async(args: argparse.Namespace) -> None:
     overrides = {}
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
-    if args.mem_fraction_static is not None:
-        overrides["mem_fraction_static"] = args.mem_fraction_static
 
     config = MingOmniPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
-        server_args_overrides=overrides if overrides else None,
     )
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
+    if args.mem_fraction_static is not None:
+        if not 0.0 < args.mem_fraction_static < 1.0:
+            raise ValueError(
+                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
+            )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={"mem_fraction_static": args.mem_fraction_static},
+        )
     runner = build_pipeline_runner(config)
 
     await runner.start()

@@ -74,7 +74,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-talker", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--cpu-offload-gb", type=float, default=0)
-    parser.add_argument("--mem-fraction-static", type=float, default=None)
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for the thinker stage. "
+            "If omitted, SGLang chooses automatically."
+        ),
+    )
     parser.add_argument(
         "--tp-size", type=int, default=1, help="Tensor parallel size for thinker"
     )
@@ -94,17 +102,26 @@ async def main_async(args: argparse.Namespace) -> None:
     overrides = {}
     if args.tp_size > 1:
         overrides["tp_size"] = args.tp_size
+        overrides["disable_custom_all_reduce"] = True
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
-    if args.mem_fraction_static is not None:
-        overrides["mem_fraction_static"] = args.mem_fraction_static
 
     config = MingOmniSpeechPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
         gpu_placement=gpu_placement,
-        server_args_overrides=overrides if overrides else None,
     )
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
+    if args.mem_fraction_static is not None:
+        if not 0.0 < args.mem_fraction_static < 1.0:
+            raise ValueError(
+                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
+            )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={"mem_fraction_static": args.mem_fraction_static},
+        )
     runner = MultiProcessPipelineRunner(config)
     logger.info("Starting Ming-Omni speech pipeline...")
     await runner.start(timeout=600)

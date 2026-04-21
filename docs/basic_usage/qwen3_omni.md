@@ -135,6 +135,45 @@ sgl-omni serve \
   --port 8008
 ```
 
+By default, leave `mem_fraction_static` unset and let SGLang-Omni auto-size the
+SGLang AR memory budget. If a specific machine needs manual tuning, you can pin
+the value globally or per AR stage:
+
+```bash
+sgl-omni serve \
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --port 8008 \
+  --mem-fraction-static 0.88
+```
+
+Use per-stage flags when the thinker and talker need different budgets:
+
+```bash
+sgl-omni serve \
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --port 8008 \
+  --thinker-mem-fraction-static 0.88 \
+  --talker-mem-fraction-static 0.88
+```
+
+The speech server launcher exposes the same per-stage controls:
+
+```bash
+python examples/run_qwen3_omni_speech_server.py \
+  --model-path Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --gpu-thinker 0 \
+  --gpu-talker 1 \
+  --gpu-code-predictor 1 \
+  --gpu-code2wav 1 \
+  --port 8008 \
+  --thinker-mem-fraction-static 0.88 \
+  --talker-mem-fraction-static 0.88
+```
+
+`--mem-fraction-static` applies to both Qwen AR stages. Per-stage flags override
+the global value for that stage. Values must be greater than `0` and less than
+`1`.
+
 ### Image and Text Input
 
 Send an image with a text question to get both text and audio responses. Set `"modalities": ["text", "audio"]` to enable audio output.

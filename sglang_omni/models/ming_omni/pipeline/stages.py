@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from sglang_omni.engines.ar.sglang_backend.server_args_builder import (
+    OMNI_ENCODER_MEM_FRACTION_STATIC_RESERVE,
     build_sglang_server_args,
 )
 from sglang_omni.engines.omni import create_sglang_ar_engine, create_single_pass_engine
@@ -32,6 +33,7 @@ from sglang_omni.models.ming_omni.pipeline.next_stage import (
 )
 from sglang_omni.models.ming_omni.pipeline.state_io import load_state, store_state
 from sglang_omni.proto import StagePayload
+from sglang_omni.utils.misc import avail_gpu_mem
 
 
 def _event_to_dict(event: OmniEvent) -> dict[str, Any]:
@@ -304,8 +306,8 @@ def create_sglang_thinker_executor_from_config(
     import logging as _log
 
     _log.getLogger(__name__).info(
-        "create_sglang_thinker_executor_from_config: server_args_overrides=%s",
-        server_args_overrides,
+        f"create_sglang_thinker_executor_from_config: "
+        f"server_args_overrides={server_args_overrides}"
     )
     _ensure_ming_config_registered(model_path)
     # Use local snapshot path so AutoConfig finds our patched files
@@ -332,19 +334,38 @@ def create_sglang_thinker_executor_from_config(
         overrides["json_model_override_args"] = model_override
         overrides.setdefault("base_gpu_id", gpu_id)
 
+    pre_load_avail_mem = avail_gpu_mem(gpu_id)
     server_args = build_sglang_server_args(
-        local_path, context_length=thinker_max_seq_len, **overrides
+        local_path,
+        context_length=thinker_max_seq_len,
+        auto_mem_fraction_static_reserve=OMNI_ENCODER_MEM_FRACTION_STATIC_RESERVE,
+        **overrides,
+    )
+    pre_load_mem = (
+        f", pre_load_avail_mem={pre_load_avail_mem:.2f} GB"
+        if pre_load_avail_mem is not None
+        else ""
     )
     _log.getLogger(__name__).info(
-        "ServerArgs: cpu_offload_gb=%s, mem_fraction_static=%s",
-        server_args.cpu_offload_gb,
-        server_args.mem_fraction_static,
+        f"ServerArgs: cpu_offload_gb={server_args.cpu_offload_gb}, "
+        f"mem_fraction_static={server_args.mem_fraction_static}"
+        f"{pre_load_mem}"
     )
-    return create_sglang_thinker_executor(
+    executor = create_sglang_thinker_executor(
         server_args=server_args,
         model_path=local_path,
         gpu_id=gpu_id,
     )
+    post_load_avail_mem = avail_gpu_mem(gpu_id)
+    post_load_mem = (
+        f" post_load_avail_mem={post_load_avail_mem:.2f} GB"
+        if post_load_avail_mem is not None
+        else ""
+    )
+    _log.getLogger(__name__).info(
+        f"Ming thinker SGLang executor initialized: gpu_id={gpu_id}{post_load_mem}"
+    )
+    return executor
 
 
 def create_talker_executor(

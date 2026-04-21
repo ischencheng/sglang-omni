@@ -60,6 +60,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--relay-backend", type=str, default="shm", choices=["nixl", "shm"]
     )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for both Qwen AR stages "
+            "(thinker and talker). If omitted, SGLang chooses automatically."
+        ),
+    )
+    parser.add_argument(
+        "--thinker-mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static only for the thinker stage. "
+            "Overrides --mem-fraction-static for thinker."
+        ),
+    )
+    parser.add_argument(
+        "--talker-mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static only for the talker stage. "
+            "Overrides --mem-fraction-static for talker."
+        ),
+    )
 
     # Server
     parser.add_argument("--host", type=str, default="0.0.0.0")
@@ -71,6 +98,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main_async(args: argparse.Namespace) -> None:
     import uvicorn
+    from _launcher_mem_fraction import resolve_and_apply_speech_mem_fraction
 
     from sglang_omni.client import Client
     from sglang_omni.models.qwen3_omni.config import Qwen3OmniSpeechPipelineConfig
@@ -89,6 +117,24 @@ async def main_async(args: argparse.Namespace) -> None:
         model_path=args.model_path,
         relay_backend=args.relay_backend,
         gpu_placement=gpu_placement,
+    )
+    thinker_mem_fraction_static, talker_mem_fraction_static = (
+        resolve_and_apply_speech_mem_fraction(
+            config,
+            global_mem_fraction_static=args.mem_fraction_static,
+            thinker_mem_fraction_static=args.thinker_mem_fraction_static,
+            talker_mem_fraction_static=args.talker_mem_fraction_static,
+        )
+    )
+    logger.info(
+        f"Speech server config: thinker_gpu={args.gpu_thinker} "
+        f"talker_gpu={args.gpu_talker} "
+        f"code_predictor_gpu={args.gpu_code_predictor} "
+        f"code2wav_gpu={args.gpu_code2wav} "
+        f"thinker_mem_fraction_static="
+        f"{'auto' if thinker_mem_fraction_static is None else thinker_mem_fraction_static} "
+        f"talker_mem_fraction_static="
+        f"{'auto' if talker_mem_fraction_static is None else talker_mem_fraction_static}"
     )
 
     runner = MultiProcessPipelineRunner(config)

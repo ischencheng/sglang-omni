@@ -102,6 +102,11 @@ class PipelineConfig(BaseModel):
         """
         return PipelineConfig(**data)
 
+    @classmethod
+    def mem_fraction_role_to_stage(cls) -> dict[str, str]:
+        """Class-level role to stage mapping for mem_fraction_static overrides."""
+        return {}
+
     def _validate_general(self) -> None:
         if not self.model_path:
             raise ValueError("Model path is required")
@@ -220,3 +225,21 @@ class PipelineConfig(BaseModel):
 
         entry_stage = name_map[self.entry_stage]
         return stages_out, name_map, entry_stage
+
+    def apply_server_args_overrides(
+        self, *, stage_name: str, overrides: dict[str, Any]
+    ) -> None:
+        """Inject raw SGLang server args overrides into a stage executor.
+
+        NOTE (Ratish): This performs an in-place `dict.update()` on
+        `stage.executor.args["server_args_overrides"]` after Pydantic
+        validation. Override keys and values are not validated against a
+        dedicated schema. Repeated calls are last-write-wins on a per-key basis.
+        """
+        for stage in self.stages:
+            if stage.name == stage_name:
+                stage.executor.args.setdefault("server_args_overrides", {}).update(
+                    overrides
+                )
+                return
+        raise ValueError(f"Unknown stage {stage_name!r}")

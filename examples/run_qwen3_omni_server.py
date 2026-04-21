@@ -51,12 +51,6 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="GB of model weights to offload to CPU",
     )
-    parser.add_argument(
-        "--mem-fraction-static",
-        type=float,
-        default=None,
-        help="Fraction of GPU memory for KV cache",
-    )
 
     # Pipeline options
     parser.add_argument(
@@ -65,6 +59,15 @@ def parse_args() -> argparse.Namespace:
         default="shm",
         choices=["shm", "nccl", "nixl"],
         help="Relay type for inter-stage data transfer",
+    )
+    parser.add_argument(
+        "--mem-fraction-static",
+        type=float,
+        default=None,
+        help=(
+            "Set SGLang mem_fraction_static for the thinker stage. "
+            "If omitted, SGLang chooses automatically."
+        ),
     )
 
     # Server
@@ -86,21 +89,27 @@ def main() -> None:
     overrides = {}
     if args.cpu_offload_gb:
         overrides["cpu_offload_gb"] = args.cpu_offload_gb
-    if args.mem_fraction_static is not None:
-        overrides["mem_fraction_static"] = args.mem_fraction_static
 
     config = Qwen3OmniPipelineConfig(
         model_path=args.model_path,
         relay_backend=args.relay_backend,
-        server_args_overrides=overrides or None,
     )
+    if overrides:
+        config.apply_server_args_overrides(stage_name="thinker", overrides=overrides)
+    if args.mem_fraction_static is not None:
+        if not 0.0 < args.mem_fraction_static < 1.0:
+            raise ValueError(
+                f"--mem-fraction-static must be > 0 and < 1, got {args.mem_fraction_static}"
+            )
+        config.apply_server_args_overrides(
+            stage_name="thinker",
+            overrides={"mem_fraction_static": args.mem_fraction_static},
+        )
 
     # Override thinker_max_seq_len in stage executor args if provided
     if args.thinker_max_seq_len is not None:
         for stage in config.stages:
             if stage.name == "thinker":
-                if stage.executor.args is None:
-                    stage.executor.args = {}
                 stage.executor.args["thinker_max_seq_len"] = args.thinker_max_seq_len
 
     launch_server(
