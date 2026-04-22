@@ -33,7 +33,7 @@ MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 CONCURRENCY = 8
 STARTUP_TIMEOUT = 900
 
-MMMU_MIN_ACCURACY = 0.52
+MMMU_MIN_ACCURACY = 0.54
 
 # Note (Yifei, Chenyang): Thresholds reference
 # https://github.com/sgl-project/sglang-omni/pull/265#issuecomment-4228251028
@@ -81,10 +81,22 @@ def test_mmmu_accuracy_and_speed(
         max_concurrency=CONCURRENCY,
         output_dir=str(tmp_path / "mmmu"),
         repo_id=DATASETS["mmmu-ci-50"],
+        # Note (Yifei):
+        # Regression guard for issue #299: warmup pre-populates the image
+        # encoder cache so the first real batch mixes cached and uncached
+        # requests. warmup > 1 keeps the lone hit from landing alone.
+        warmup=2,
     )
     results = asyncio.run(run_mmmu_eval(config))
 
     summary = results["summary"]
+    failed = summary.get("failed", 0)
+    total = summary.get("total_samples", 0)
+    assert failed == 0, (
+        f"MMMU had {failed}/{total} failed requests (timeouts or empty responses); "
+        f"any failure fails the test"
+    )
+
     assert summary["accuracy"] >= MMMU_MIN_ACCURACY, (
         f"MMMU accuracy {summary['accuracy']:.4f} "
         f"({summary['accuracy'] * 100:.1f}%) < "
