@@ -1275,7 +1275,15 @@ budget). Reusing the AR builder also fails at runtime because Phase 0's
 factory does not know a meaningful `context_length` for the encoder
 process.
 
-We therefore add a sibling helper next to the AR builder:
+We therefore add a sibling helper next to the AR builder. For encoder
+stages, tensor parallelism has exactly one source of truth:
+`StageConfig.tp_size` plus `StageConfig.gpu`. `MultiProcessPipelineRunner`
+turns those fields into the per-rank `tp_rank`, `tp_size`, `gpu_id`, and
+`nccl_port` kwargs that reach `SGLangEncoderWorker`. `server_args_overrides`
+is only for safe SGLang loading/runtime knobs such as quantization,
+attention backend, and remote weight loading; it must not be able to
+change rank topology or GPU placement after the runner has already
+spawned processes.
 
 ```python
 # sglang_omni_v1/scheduling/sglang_backend/server_args_builder.py
@@ -1295,7 +1303,12 @@ _ENCODER_PROTECTED_KEYS = frozenset({
     "moe_dense_tp_size",
     "nnodes",
     "node_rank",
+    "rank",
+    "world_size",
+    "tp_rank",
+    "gpu_id",
     "base_gpu_id",
+    "nccl_port",
     "dist_init_addr",
     # Encoder-only fork
     "encoder_only",
@@ -1370,12 +1383,13 @@ def build_sglang_encoder_server_args(
 The protected-key reject covers:
 
 - `tp_size`, `pp_size`, `dp_size`, `moe_dp_size`, `ep_size`,
-  `attn_cp_size`, `moe_dense_tp_size`, `nnodes`, `node_rank`,
-  `base_gpu_id`, `dist_init_addr` — pipeline runner decides these from
+  `attn_cp_size`, `moe_dense_tp_size`, `nnodes`, `node_rank`, `rank`,
+  `world_size`, `tp_rank`, `gpu_id`, `base_gpu_id`, `nccl_port`,
+  `dist_init_addr` — pipeline runner decides these from
   `StageConfig.tp_size` / `gpu` and the per-stage NCCL port allocator.
-  Phase 0 starts exactly `tp_size` local ranks; DP, EP, attention-CP, and
-  multinode shapes are out of scope and cannot be activated through
-  `server_args_overrides`.
+  Phase 0 starts exactly `StageConfig.tp_size` local ranks; DP, EP,
+  attention-CP, and multinode shapes are out of scope and cannot be
+  activated through `server_args_overrides`.
 - `encoder_only` / `language_only` — flipping these would route through
   a different upstream model factory and break the whole RFC.
 - `mm_enable_dp_encoder` — Phase 0–2 require encoder TP only; allowing
@@ -1403,6 +1417,13 @@ forward for FP8 / NVFP4 / remote-streaming deployments. `dtype` and
 `load_format` are also supported, but as top-level factory / worker
 arguments rather than `server_args_overrides`, to avoid duplicate keyword
 binding before the protected-key helper runs.
+
+`model_path`, `tp_size`, `base_gpu_id`, `dist_init_addr`, `dtype`, and
+`load_format` are rejected one level earlier in `SGLangEncoderWorker`
+because the helper receives them as explicit keyword arguments. That
+early reject is intentional: otherwise Python would raise a generic
+"got multiple values for keyword argument" `TypeError` before the
+protected-key check can produce the source-of-truth error message.
 
 `SGLangEncoderWorker.__init__` calls this helper directly. AR-only
 knobs (`mem_fraction_static`, `max_running_requests`,
@@ -2375,12 +2396,32 @@ Phase 0 — landing path that doesn't break v1:
      `chunked_prefill_size`, `context_length`, `max_prefill_tokens`.
      This is the helper signature `(..., **overrides)` so the AR knob
      goes in as a direct keyword.
+   - **Encoder TP source-of-truth protection — helper level**: directly
+     call `build_sglang_encoder_server_args(model_path=..., tp_size=1,
+     base_gpu_id=0, dist_init_addr="...", tp_rank=1)` and assert it
+     raises `ValueError` referencing `tp_rank` before `ServerArgs` is
+     constructed. Repeat for `gpu_id`, `nccl_port`, `rank`, and
+     `world_size`. This covers topology keys that reach the helper
+     through `**overrides`; helper-signature keys such as `tp_size`,
+     `base_gpu_id`, and `dist_init_addr` are covered by the worker-level
+     test below because Python would otherwise reject the duplicate
+     keyword before helper code can run.
    - **AR-only knob protection — factory level**: call
      `create_image_encoder_executor(...,
      server_args_overrides={"mem_fraction_static": 0.5})` and assert
      the `ValueError` propagates from helper through worker
      `**overrides` splat. This locks the dict-style entry point users
      actually configure through `StageConfig.factory_args`.
+   - **Encoder TP source-of-truth protection — factory level**: call
+     `create_image_encoder_executor(...,
+     server_args_overrides={"tp_size": 2})` and assert the same
+     source-of-truth `ValueError` propagates before
+     `build_sglang_encoder_server_args(...)` is called. Repeat for
+     `base_gpu_id`, `dist_init_addr`, `dtype`, `load_format`, and for
+     `create_audio_encoder_executor`. This catches the user-facing
+     config shape where a deployment tries to configure encoder TP or
+     GPU placement through `server_args_overrides` instead of
+     `StageConfig.tp_size` / `StageConfig.gpu`.
 2. Add `sglang_omni_v1/model_runner/sglang_encoder_worker.py`. Behind
    `backend="sglang"` only — never the default in this PR.
 3. Add `sglang_omni_v1/scheduling/encoder_scheduler.py` including the
