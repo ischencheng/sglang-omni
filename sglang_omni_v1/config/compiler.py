@@ -15,9 +15,13 @@ from sglang_omni_v1.pipeline.stage.input import InputHandler
 from sglang_omni_v1.utils import import_string
 
 
+_SGLANG_BACKENDS = frozenset({"sglang", "auto"})
+
+
 def compile_pipeline(config: PipelineConfig) -> tuple[Coordinator, list[Stage]]:
     """Build the coordinator and stage objects from the pipeline configuration."""
     stages_cfg, name_map, entry_stage = config.apply_fusion()
+    _reject_incompatible_single_process_stages(stages_cfg, config)
     endpoints = _allocate_endpoints(config, stages=stages_cfg)
 
     coordinator = Coordinator(
@@ -133,6 +137,48 @@ def _create_input_handler(
 # ------------------------------------------------------------------
 # Factory args
 # ------------------------------------------------------------------
+
+
+def _reject_incompatible_single_process_stages(
+    stages_cfg: list[StageConfig],
+    config: PipelineConfig,
+) -> None:
+    """Reject configs that the single-process compile path cannot honor.
+
+    Two structural mismatches:
+
+    - ``backend in {"sglang", "auto"}``: SGLang's distributed init is
+      module-level inside SGLang and can only run once per process; the
+      single-process compile path also never invokes the launcher's
+      per-process CUDA remap, so a `gpu=4, tp_size=1` worker would load
+      its model on physical GPU 0. Force users through
+      ``MultiProcessPipelineRunner``.
+    - ``tp_size > 1``: ``_resolve_factory_args`` only injects
+      ``model_path`` / ``gpu_id``; it never injects
+      ``tp_rank/tp_size/nccl_port``. A direct caller of
+      ``compile_pipeline`` would silently get a ``tp_size=1`` factory
+      with TP completely lost, no error. Reject early so the
+      mistake surfaces.
+
+    ``serve/launcher.py`` already routes both shapes through
+    ``MultiProcessPipelineRunner``; this guard catches direct callers.
+    """
+    for stage_cfg in stages_cfg:
+        backend = _resolve_factory_args(stage_cfg, config).get("backend", "local")
+        if backend in _SGLANG_BACKENDS:
+            raise ValueError(
+                f"Stage {stage_cfg.name!r}: backend={backend!r} requires "
+                f"MultiProcessPipelineRunner. compile_pipeline is the "
+                f"single-process path; use serve/launcher.launch_server "
+                f"or instantiate MultiProcessPipelineRunner directly."
+            )
+        if stage_cfg.tp_size > 1:
+            raise ValueError(
+                f"Stage {stage_cfg.name!r}: tp_size={stage_cfg.tp_size} > 1 "
+                f"requires MultiProcessPipelineRunner. compile_pipeline "
+                f"never injects tp_rank/tp_size/nccl_port and would silently "
+                f"downgrade TP factories to single-rank."
+            )
 
 
 def _resolve_factory_args(

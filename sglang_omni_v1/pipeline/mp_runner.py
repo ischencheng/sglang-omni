@@ -10,6 +10,7 @@ Architecture
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import multiprocessing
 import socket
@@ -25,8 +26,77 @@ from sglang_omni_v1.config.schema import PipelineConfig, StageConfig
 from sglang_omni_v1.pipeline import Coordinator
 from sglang_omni_v1.pipeline.stage_group import StageGroup
 from sglang_omni_v1.pipeline.stage_process import StageProcessSpec
+from sglang_omni_v1.utils import import_string
 
 logger = logging.getLogger(__name__)
+
+# Backends that require per-process CUDA isolation and a real distributed init.
+_SGLANG_BACKENDS = frozenset({"sglang", "auto"})
+
+# TP launch kwargs the runner injects into stage factories.
+_TP_LAUNCH_PARAMS = frozenset({"tp_rank", "tp_size", "nccl_port"})
+
+
+def _resolved_backend(stage_cfg: StageConfig, config: PipelineConfig) -> str:
+    """Resolve a stage's backend through factory_args + runtime_overrides only.
+
+    Mirrors the [Backend resolution contract] from the RFC: launcher
+    decisions never read factory signature defaults, so a StageConfig
+    that wants the SGLang backend must place ``backend`` into
+    ``factory_args`` (or ``runtime_overrides``) explicitly.
+    """
+    return _resolve_factory_args(stage_cfg, config).get("backend", "local")
+
+
+def _is_sglang_backend(backend: str) -> bool:
+    return backend in _SGLANG_BACKENDS
+
+
+def any_sglang_backend_stage(config: PipelineConfig) -> bool:
+    """Return True iff any stage resolves to backend in {sglang, auto}."""
+    return any(
+        _is_sglang_backend(_resolved_backend(s, config)) for s in config.stages
+    )
+
+
+def _run_tp_preflight(stages_cfg: list[StageConfig], config: PipelineConfig) -> None:
+    """Reject TP misconfigurations before any subprocess is spawned.
+
+    Layer 1: any TP stage's factory must accept the TP launch kwargs the
+    runner is about to inject (tp_rank/tp_size/nccl_port). Without this,
+    the runner spawns N children and each fails at factory binding time.
+
+    Layer 2: encoder factories that expose a ``backend`` parameter only
+    implement TP under ``backend="sglang"``. ``backend="local"``/``"auto"``
+    silently spawns N processes that each run a redundant local forward,
+    so reject early.
+    """
+    for stage_cfg in stages_cfg:
+        if stage_cfg.tp_size <= 1:
+            continue
+        factory = import_string(stage_cfg.factory)
+        params = inspect.signature(factory).parameters
+
+        missing = sorted(_TP_LAUNCH_PARAMS - params.keys())
+        if missing:
+            raise ValueError(
+                f"Stage {stage_cfg.name!r}: tp_size={stage_cfg.tp_size} > 1 "
+                f"but factory {stage_cfg.factory!r} does not accept TP "
+                f"launch parameters {missing}. This factory is not "
+                f"TP-capable; reduce tp_size to 1 or use a factory that "
+                f"accepts tp_rank/tp_size/nccl_port."
+            )
+
+        if "backend" in params:
+            backend = _resolved_backend(stage_cfg, config)
+            if backend != "sglang":
+                raise ValueError(
+                    f"Stage {stage_cfg.name!r}: tp_size={stage_cfg.tp_size} "
+                    f"requires backend='sglang' (got {backend!r}). The "
+                    f"local encoder path does not implement TP and would "
+                    f"silently spawn TP-rank processes that each run a "
+                    f"redundant local forward."
+                )
 
 
 def _build_stage_groups(
@@ -42,6 +112,7 @@ def _build_stage_groups(
         ctx = multiprocessing.get_context("spawn")
 
     stages_cfg, name_map, _ = config.apply_fusion()
+    _run_tp_preflight(stages_cfg, config)
     endpoints = _allocate_endpoints(config, stages=stages_cfg)
     stage_endpoints = {s.name: endpoints[f"stage_{s.name}"] for s in stages_cfg}
     cfg_map = {s.name: s for s in stages_cfg}
@@ -72,6 +143,15 @@ def _build_stage_groups(
         # Pre-resolve factory args (inject model_path, gpu_id)
         base_factory_args = _resolve_factory_args(stage_cfg, config)
 
+        # Resolve backend through merged factory_args + runtime_overrides,
+        # never the factory signature default. This drives the
+        # single-visible-device launch contract for the SGLang encoder
+        # worker. See encoder_tp_path_b_design.md "Backend resolution
+        # contract".
+        single_visible_device = _is_sglang_backend(
+            base_factory_args.get("backend", "local")
+        )
+
         stage_kwargs = dict(
             stage_name=stage_cfg.name,
             factory=stage_cfg.factory,
@@ -100,6 +180,7 @@ def _build_stage_groups(
                     recv_endpoint=stage_endpoints[stage_cfg.name],
                     base_factory_args=base_factory_args,
                     stage_kwargs=stage_kwargs,
+                    single_visible_device=single_visible_device,
                 )
             ]
         else:
@@ -112,6 +193,7 @@ def _build_stage_groups(
                 recv_endpoint=stage_endpoints[stage_cfg.name],
                 base_factory_args=base_factory_args,
                 stage_kwargs=stage_kwargs,
+                single_visible_device=single_visible_device,
             )
 
         groups.append(StageGroup(stage_cfg.name, specs))
@@ -143,6 +225,7 @@ def _build_single_stage_spec(
     recv_endpoint: str,
     base_factory_args: dict[str, Any],
     stage_kwargs: dict[str, Any],
+    single_visible_device: bool = False,
 ) -> StageProcessSpec:
     factory_args = dict(base_factory_args)
     if "gpu_id" in base_factory_args:
@@ -157,6 +240,7 @@ def _build_single_stage_spec(
         factory_args=factory_args,
         relay_config=relay_config,
         recv_endpoint=recv_endpoint,
+        single_visible_device=single_visible_device,
         **stage_kwargs,
     )
 
@@ -171,6 +255,7 @@ def _build_tp_stage_specs(
     recv_endpoint: str,
     base_factory_args: dict[str, Any],
     stage_kwargs: dict[str, Any],
+    single_visible_device: bool = False,
 ) -> list[StageProcessSpec]:
     follower_work_queues = [ctx.Queue() for _ in range(stage_cfg.tp_size - 1)]
     follower_abort_queues = [ctx.Queue() for _ in range(stage_cfg.tp_size - 1)]
@@ -200,6 +285,7 @@ def _build_tp_stage_specs(
                     recv_endpoint=recv_endpoint,
                     follower_work_queues=follower_work_queues,
                     follower_abort_queues=follower_abort_queues,
+                    single_visible_device=single_visible_device,
                     **stage_kwargs,
                 )
             )
@@ -218,6 +304,7 @@ def _build_tp_stage_specs(
                 recv_endpoint="",
                 internal_work_queue=follower_work_queues[idx],
                 internal_abort_queue=follower_abort_queues[idx],
+                single_visible_device=single_visible_device,
                 **stage_kwargs,
             )
         )

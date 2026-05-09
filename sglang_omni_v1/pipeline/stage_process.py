@@ -72,6 +72,13 @@ class StageProcessSpec:
     internal_work_queue: Any | None = None
     internal_abort_queue: Any | None = None
 
+    # Force one-visible-device CUDA env even at tp_size==1.
+    # Set by the launcher when the resolved factory backend is "sglang"
+    # (or "auto") so the SGLang encoder worker always sees its physical
+    # GPU as cuda:0. See encoder_tp_path_b_design.md "GPU placement
+    # across tp_size=1 and tp_size>1 lanes".
+    single_visible_device: bool = False
+
     @property
     def owns_external_io(self) -> bool:
         return self.role in {"single", "leader"}
@@ -223,7 +230,7 @@ def get_stage_process_env(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Return per-process env overrides needed before TP child startup."""
-    if spec.tp_size <= 1:
+    if spec.tp_size <= 1 and not spec.single_visible_device:
         return {}
 
     source_env = env if env is not None else os.environ

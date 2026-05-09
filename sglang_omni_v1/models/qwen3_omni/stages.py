@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -701,11 +701,38 @@ def create_aggregate_executor():
     return SimpleScheduler(_identity)
 
 
-def create_image_encoder_executor(
+_BACKEND_CHOICES = ("local", "sglang", "auto")
+
+
+def _resolve_backend(
+    backend: str,
     model_path: str,
     *,
-    device: str = "cuda",
-    dtype: str | None = None,
+    stage: str,
+) -> Literal["local", "sglang"]:
+    """Resolve ``backend="auto"`` to a concrete backend.
+
+    Phase 0 keeps "auto" pinned to "local" until parity is locked. Phase
+    2 will flip "auto" -> "sglang" for upstream-supported encoder
+    stages (see RFC Phase 2). Any explicit value of ``backend`` is
+    accepted as-is.
+    """
+    del model_path  # not consumed in Phase 0
+    if backend not in _BACKEND_CHOICES:
+        raise ValueError(
+            f"Stage {stage!r}: backend must be one of {_BACKEND_CHOICES}, "
+            f"got {backend!r}"
+        )
+    if backend == "auto":
+        return "local"
+    return backend  # type: ignore[return-value]
+
+
+def _build_local_image_encoder(
+    model_path: str,
+    *,
+    device: str,
+    dtype: str | None,
 ):
     from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
 
@@ -731,10 +758,6 @@ def create_image_encoder_executor(
             cache_manager=cache_manager,
         )
 
-    # Note (Chenyang): match v0's image-encoder batching shape (max=32) and
-    # add a small batch_wait so video benchmarks at concurrency=16 batch
-    # together. Without the wait, requests arriving microseconds apart end
-    # up in batches of 1; with the wait, all 16 land in one forward pass.
     return SimpleScheduler(
         _encode,
         batch_compute_fn=_encode_batch,
@@ -745,11 +768,11 @@ def create_image_encoder_executor(
     )
 
 
-def create_audio_encoder_executor(
+def _build_local_audio_encoder(
     model_path: str,
     *,
-    device: str = "cuda",
-    dtype: str | None = None,
+    device: str,
+    dtype: str | None,
 ):
     from sglang_omni_v1.scheduling.simple_scheduler import SimpleScheduler
 
@@ -781,6 +804,171 @@ def create_audio_encoder_executor(
         max_batch_size=32,
         max_batch_wait_ms=50,
     )
+
+
+def _resolve_dtype(dtype: str | None) -> torch.dtype:
+    if dtype is None:
+        return torch.float16
+    if dtype in ("float16", "fp16", "half"):
+        return torch.float16
+    if dtype in ("bfloat16", "bf16"):
+        return torch.bfloat16
+    if dtype in ("float32", "fp32"):
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {dtype!r}")
+
+
+def _build_sglang_encoder_scheduler(
+    *,
+    model_path: str,
+    stage: Literal["image_encoder", "audio_encoder"],
+    gpu_id: int,
+    tp_rank: int,
+    tp_size: int,
+    nccl_port: int | None,
+    max_batch_size: int,
+    max_batch_wait_ms: int,
+    activation_budget_bytes: int | None,
+    server_args_overrides: dict[str, Any] | None,
+    dtype: str | None,
+    load_format: str | None,
+):
+    """Build the SGLang encoder worker + EncoderScheduler for a stage."""
+    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+    from sglang_omni_v1.models.qwen3_omni.components.common import (
+        load_thinker_config,
+    )
+    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
+        Qwen3OmniAudioEncoderAdapter,
+        Qwen3OmniImageEncoderAdapter,
+    )
+    from sglang_omni_v1.scheduling.encoder_scheduler import EncoderScheduler
+
+    worker = SGLangEncoderWorker(
+        model_path=model_path,
+        gpu_id=gpu_id,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        nccl_port=nccl_port,
+        dtype=dtype,
+        load_format=load_format,
+        server_args_overrides=server_args_overrides,
+    )
+
+    hf_thinker_config = load_thinker_config(model_path)
+    torch_dtype = _resolve_dtype(dtype)
+
+    if stage == IMAGE_STAGE:
+        adapter = Qwen3OmniImageEncoderAdapter(
+            hf_config=hf_thinker_config, dtype=torch_dtype
+        )
+    else:
+        adapter = Qwen3OmniAudioEncoderAdapter(
+            hf_config=hf_thinker_config, dtype=torch_dtype
+        )
+
+    return EncoderScheduler(
+        worker=worker,
+        adapter=adapter,
+        max_batch_size=max_batch_size,
+        max_batch_wait_ms=max_batch_wait_ms,
+        request_cost_fn=adapter.request_cost_fn,
+        max_batch_cost=activation_budget_bytes,
+    )
+
+
+def create_image_encoder_executor(
+    model_path: str,
+    *,
+    backend: Literal["local", "sglang", "auto"] = "local",
+    gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
+    device: str = "cuda",
+    dtype: str | None = None,
+    load_format: str | None = None,
+    max_batch_size: int = 32,
+    max_batch_wait_ms: int = 50,
+    activation_budget_bytes: int | None = QWEN3_IMAGE_ENCODER_BATCH_BUDGET_BYTES,
+    server_args_overrides: dict[str, Any] | None = None,
+):
+    """Build the image-encoder stage scheduler.
+
+    The signature default for ``backend`` is and stays ``"local"`` —
+    the launcher reads ``factory_args`` / ``runtime_overrides`` only, so
+    a deployment that wants the SGLang backend must put
+    ``backend="sglang"`` (or ``"auto"``) into the StageConfig
+    explicitly. Bumping this default would silently desync launcher
+    (sees "local") from factory body (sees "auto"). See the
+    [Backend resolution contract] in the RFC.
+    """
+    chosen = _resolve_backend(backend, model_path, stage="image_encoder")
+    if chosen == "sglang":
+        return _build_sglang_encoder_scheduler(
+            model_path=model_path,
+            stage=IMAGE_STAGE,
+            gpu_id=gpu_id,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            nccl_port=nccl_port,
+            max_batch_size=max_batch_size,
+            max_batch_wait_ms=max_batch_wait_ms,
+            activation_budget_bytes=activation_budget_bytes,
+            server_args_overrides=server_args_overrides,
+            dtype=dtype,
+            load_format=load_format,
+        )
+    # Local fallback
+    if tp_size > 1:
+        raise ValueError(
+            f"image_encoder backend='local' does not support tp_size>1 "
+            f"(got tp_size={tp_size}). Use backend='sglang' for tensor "
+            f"parallelism."
+        )
+    return _build_local_image_encoder(model_path, device=device, dtype=dtype)
+
+
+def create_audio_encoder_executor(
+    model_path: str,
+    *,
+    backend: Literal["local", "sglang", "auto"] = "local",
+    gpu_id: int = 0,
+    tp_rank: int = 0,
+    tp_size: int = 1,
+    nccl_port: int | None = None,
+    device: str = "cuda",
+    dtype: str | None = None,
+    load_format: str | None = None,
+    max_batch_size: int = 32,
+    max_batch_wait_ms: int = 50,
+    activation_budget_bytes: int | None = None,
+    server_args_overrides: dict[str, Any] | None = None,
+):
+    """Build the audio-encoder stage scheduler. See ``create_image_encoder_executor``."""
+    chosen = _resolve_backend(backend, model_path, stage="audio_encoder")
+    if chosen == "sglang":
+        return _build_sglang_encoder_scheduler(
+            model_path=model_path,
+            stage=AUDIO_STAGE,
+            gpu_id=gpu_id,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            nccl_port=nccl_port,
+            max_batch_size=max_batch_size,
+            max_batch_wait_ms=max_batch_wait_ms,
+            activation_budget_bytes=activation_budget_bytes,
+            server_args_overrides=server_args_overrides,
+            dtype=dtype,
+            load_format=load_format,
+        )
+    if tp_size > 1:
+        raise ValueError(
+            f"audio_encoder backend='local' does not support tp_size>1 "
+            f"(got tp_size={tp_size}). Use backend='sglang' for tensor "
+            f"parallelism."
+        )
+    return _build_local_audio_encoder(model_path, device=device, dtype=dtype)
 
 
 def create_decode_executor(model_path: str):

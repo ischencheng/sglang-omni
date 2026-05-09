@@ -147,7 +147,14 @@ async def _run_server(
         else:
             gpu_ids.add(v)
     any_tp = any(s.tp_size > 1 for s in pipeline_config.stages)
-    needs_mp = len(gpu_ids) > 1 or any_tp
+    # Stages whose resolved factory backend is "sglang" / "auto" must run
+    # in their own subprocess so the launcher can remap CUDA_VISIBLE_DEVICES
+    # before torch is imported. See encoder_tp_path_b_design.md
+    # "Required launcher change".
+    from sglang_omni_v1.pipeline.mp_runner import any_sglang_backend_stage
+
+    any_sglang_backend = any_sglang_backend_stage(pipeline_config)
+    needs_mp = len(gpu_ids) > 1 or any_tp or any_sglang_backend
     logger.info(
         "GPU placement: %s → %s",
         dict(pipeline_config.gpu_placement),
