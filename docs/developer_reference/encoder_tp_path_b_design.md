@@ -286,11 +286,15 @@ stays small.
 ### Sketch
 
 ```python
+import logging
+import os
+
 import torch.distributed as dist
 from sglang.srt.utils import broadcast_pyobj
 from sglang_omni_v1.pipeline.relay_io import extract_tensors, restore_tensors
 
 
+logger = logging.getLogger(__name__)
 _RECV_ERROR_KIND = "encoder_recv_error"  # picklable string tag
 
 
@@ -325,7 +329,7 @@ def _recv_messages(
     Never raises — returns (messages, error). The error is non-None if
     either rank failed during this iteration's recv. Drained messages
     are returned even on entry-rank failure so the scheduler can emit
-    request-level errors against them in the unified handshake.
+    request-level errors against them in the pre-forward handshake.
 
     Always run _strip_and_lift, even at tp_size == 1: the default shm
     relay delivers CPU tensors and upstream get_image_feature() /
@@ -504,12 +508,13 @@ existing channel.
 
 `_recv_messages` deliberately **never raises**. Returning
 `(messages, error)` lets the scheduler treat a recv-time failure
-exactly like a forward-time failure: same `local_err` slot, same
-`all_gather_object` handshake, same `_emit_error(messages, exc)`
-emission against the drained requests. If `_recv_messages` raised
-instead, the scheduler thread would die and `Stage._handle_scheduler_crash`
-(`pipeline/stage/runtime.py:145`) would tear the whole stage down —
-turning a single bad request into a stage-level abort.
+as a recoverable **pre-forward** failure: same `local_err` slot, same
+pre-forward `all_gather_object` handshake, same
+`_emit_error(messages, exc)` emission against the drained requests. If
+`_recv_messages` raised instead, the scheduler thread would die and
+`Stage._handle_scheduler_crash` (`pipeline/stage/runtime.py:145`) would
+tear the whole stage down — turning a single bad request into a
+stage-level abort.
 
 #### Allocation-ready gather
 
@@ -532,10 +537,9 @@ between the metadata broadcast and the first `dist.broadcast`:
    tensors already exist).
 3. Both ranks gather their per-rank alloc-success boolean on
    `tp.cpu_group`.
-4. If `not all(flags)`, every rank returns
-   `(messages, error)` and the scheduler's outer `all_gather_object`
-   handshake takes care of the rest — no device broadcast was ever
-   issued, so no rank blocks.
+4. If `not all(flags)`, every rank returns `(messages, error)` and the
+   scheduler's pre-forward `all_gather_object` handshake takes care of
+   the rest — no device broadcast was ever issued, so no rank blocks.
 
 This is a small, picklable collective added once per recv, and it
 makes the device broadcast loop unconditionally safe to enter once
@@ -636,68 +640,89 @@ def start(self) -> None:
     self._running = True
     while self._running:
         # ----------------------------------------------------------
-        # Per-iteration error boundary covering recv, build_batch,
-        # encode_batch, and slice_results. _recv_messages never
-        # raises — it returns (messages, error) so a recv-time
-        # failure can flow through the same handshake as a
-        # forward-time failure. All four steps are deterministic
-        # given the broadcast-equal `messages`; any one failing
-        # without rank-sync would leave peers stuck at the next
-        # collective.
+        # Three error domains:
+        # 1. recv/build_batch are pre-forward and recoverable. They
+        #    synchronize through the TP CPU group before any model
+        #    collective starts.
+        # 2. encode_batch enters upstream TP collectives. A rank-local
+        #    exception there is fatal to the stage group; do not try a
+        #    post-hoc CPU gather while peers may still be blocked in
+        #    NCCL.
+        # 3. slice_results runs only on the entry rank after forward
+        #    returned on every rank, so it can emit request errors and
+        #    continue.
         # ----------------------------------------------------------
-        results = None
-        local_err: BaseException | None = None
-
         messages, recv_err = self._recv_messages()
         if recv_err is not None:
-            local_err = recv_err
-        elif not messages:
+            if self._gather_pre_forward_error(recv_err):
+                if self.worker.is_entry_rank:
+                    self._emit_error(messages, recv_err)
+                continue
+        if not messages:
             self._idle_check()
             continue
-        else:
-            try:
-                plan = self.adapter.build_batch(messages)        # all ranks
-                raw = self.worker.encode_batch(plan)             # all ranks
-                if self.worker.is_entry_rank:
-                    results = self.adapter.slice_results(raw, plan, messages)
-            except Exception as exc:                             # noqa: BLE001
-                local_err = exc
 
-        # Synchronize error state across ranks. all_gather_object
-        # marshals the picklable error flag; the exception object
-        # itself stays local. tp_size==1 short-circuits.
-        if self.worker.tp_size > 1:
-            err_flags: list[bool] = [False] * self.worker.tp_size
-            dist.all_gather_object(
-                err_flags,
-                local_err is not None,
-                group=self.worker.tp_group.cpu_group,
-            )
-            any_err = any(err_flags)
-        else:
-            any_err = local_err is not None
+        plan = None
+        build_err: BaseException | None = None
+        try:
+            plan = self.adapter.build_batch(messages)            # all ranks
+        except Exception as exc:                                 # noqa: BLE001
+            build_err = exc
 
-        if any_err:
+        if self._gather_pre_forward_error(build_err):
             if self.worker.is_entry_rank:
-                # Emit one error per request that was drained on the
-                # entry rank this iteration. `messages` is the entry
-                # rank's drained list — populated even on recv-time
-                # failure thanks to the (messages, error) return.
                 self._emit_error(
                     messages,
-                    local_err if local_err is not None
-                    else RuntimeError("peer-rank encoder forward failed"),
+                    build_err if build_err is not None
+                    else RuntimeError("peer-rank encoder build_batch failed"),
                 )
-            # Followers do nothing here — Stage._drain_outbox_follower
-            # already discards results. The next loop iteration starts
-            # a fresh collective.
             continue
 
-        if self.worker.is_entry_rank and results is not None:
-            for msg, out in zip(messages, results):
-                self.outbox.put(
-                    OutgoingMessage(request_id=msg.request_id, type="result", data=out)
-                )
+        try:
+            raw = self.worker.encode_batch(plan)                 # all ranks
+        except Exception as exc:                                 # noqa: BLE001
+            self._fatal_tp_forward_error(exc)
+            raise                                               # unreachable
+
+        if not self.worker.is_entry_rank:
+            continue
+
+        try:
+            results = self.adapter.slice_results(raw, plan, messages)
+        except Exception as exc:                                 # noqa: BLE001
+            self._emit_error(messages, exc)
+            continue
+
+        for msg, out in zip(messages, results):
+            self.outbox.put(
+                OutgoingMessage(request_id=msg.request_id, type="result", data=out)
+            )
+
+
+def _gather_pre_forward_error(self, local_err: BaseException | None) -> bool:
+    """Synchronize recoverable recv/build errors before model collectives."""
+    if self.worker.tp_size <= 1:
+        return local_err is not None
+    err_flags: list[bool] = [False] * self.worker.tp_size
+    dist.all_gather_object(
+        err_flags,
+        local_err is not None,
+        group=self.worker.tp_group.cpu_group,
+    )
+    return any(err_flags)
+
+
+def _fatal_tp_forward_error(self, error: BaseException) -> None:
+    """Exit non-zero after a TP forward fault.
+
+    Once encode_batch has entered upstream SGLang TP collectives, one
+    rank cannot safely recover locally: peers may be stuck in NCCL and
+    never reach a CPU-side error gather. Force a child-process failure
+    so StageGroup / MultiProcessPipelineRunner tears down the whole TP
+    group and fails outstanding requests from the coordinator side.
+    """
+    logger.exception("Fatal TP encoder forward failure")
+    os._exit(1)
 ```
 
 ### Batch admission control
@@ -800,24 +825,25 @@ no separate "admission-control variant" of `_recv_messages`.
    upstream encoder; SGLang's `ColumnParallelLinear` / `RowParallelLinear`
    issue collectives internally.
 5. Emit `OutgoingMessage` to the outbox **only on the entry rank**.
-6. Run a **per-iteration error boundary** covering all four steps
-   (`_recv_messages`, `build_batch`, `encode_batch`, `slice_results`)
-   on every rank. `_recv_messages` returns `(messages, error)`
-   instead of raising; the other three are wrapped in try/except.
-   After the four steps, every rank exchanges its `local_err is None`
-   flag through `dist.all_gather_object` on the TP CPU group. If any
-   rank failed, the entry rank emits **one
-   `OutgoingMessage(type="error")` per drained request** (so HTTP-500
-   propagates per request, matching v1's existing request-level
-   error path), and every rank `continue`s into the next loop
-   iteration. Followers do **not** raise to crash the scheduler
-   thread; that would trigger `Stage._handle_scheduler_crash`
-   (`pipeline/stage/runtime.py:145`) and tear the whole stage down,
-   which is a stage-level abort, not the request-level error this
-   contract promises. `MultiProcessPipelineRunner._monitor_children`
-   is the fallback only for cases where a process actually exits
-   non-zero (e.g. a segfault inside the upstream model), not for
-   request-level encoder errors.
+6. Split scheduler failures by collective boundary:
+   - **Recoverable pre-forward:** `_recv_messages` and
+     `build_batch`. `_recv_messages` returns `(messages, error)`
+     instead of raising. `build_batch` is wrapped in try/except. Before
+     entering `encode_batch`, every rank exchanges its local error flag
+     through `dist.all_gather_object` on the TP CPU group. If any rank
+     failed, the entry rank emits **one `OutgoingMessage(type="error")`
+     per drained request** and every rank `continue`s into the next loop
+     iteration.
+   - **Fatal forward:** `encode_batch` enters upstream SGLang TP
+     collectives (`ColumnParallelLinear`, `RowParallelLinear`, attention
+     collectives, etc.). A rank-local OOM / CUDA / NCCL exception there
+     cannot be recovered with a post-hoc CPU gather because peers may
+     still be blocked in NCCL. The rank that observes the exception must
+     exit non-zero; `StageGroup` / `MultiProcessPipelineRunner` tears down
+     the whole TP group.
+   - **Recoverable post-forward:** `slice_results` runs only on the
+     entry rank after `encode_batch` returned on every rank. It can emit
+     per-request errors and continue.
 
 ### Why a new scheduler instead of extending SimpleScheduler
 
@@ -2143,26 +2169,28 @@ Rules:
 - `SGLangEncoderWorker.encode_batch` and `EncoderAdapter.run_feature` only
   catch specific expected exceptions (e.g. `OutOfMemoryError` for batch
   splitting, if we ever add it). They never catch base `Exception`.
-- `EncoderScheduler.start()` covers **four** steps in one
-  per-iteration error boundary: `_recv_messages`, `build_batch`,
-  `encode_batch`, `slice_results`. `_recv_messages` does not raise —
-  it returns `(messages, error)`. The other three are wrapped in a
-  try/except that funnels into the same `local_err` slot. Each step
-  is deterministic given the broadcast-equal `messages`, but any one
-  failing without rank-sync would leave peers stuck at the next
-  collective.
-- Cross-rank synchronization: after the four steps,
-  `dist.all_gather_object` exchanges a per-rank "did I fail?" boolean
-  on the TP CPU group. If any rank failed, every rank skips
-  emit-results and starts the next iteration on a fresh collective.
-  The entry rank emits one
-  `OutgoingMessage(type="error", data=str(exc))` per request that
-  was drained this iteration (`messages` is non-empty on recv-time
-  failure thanks to the tuple return), which
-  `Stage._drain_outbox_external` converts into a Coordinator failure
-  → HTTP 500. If a follower failed but the entry rank did not, the
-  entry rank emits `RuntimeError("peer-rank encoder forward failed")`
-  against the same drained messages.
+- `EncoderScheduler.start()` has **three** error domains, not one
+  catch-all boundary:
+  - Recoverable pre-forward: `_recv_messages` and `build_batch`.
+    `_recv_messages` does not raise — it returns `(messages, error)`.
+    `build_batch` is wrapped in try/except. Before any model collective,
+    ranks exchange a per-rank "did I fail?" boolean through
+    `dist.all_gather_object` on the TP CPU group. If any rank failed,
+    every rank skips forward and starts the next iteration on a fresh
+    recv collective. The entry rank emits one
+    `OutgoingMessage(type="error", data=str(exc))` per request that was
+    drained this iteration, which `Stage._drain_outbox_external`
+    converts into a Coordinator failure → HTTP 500.
+  - Fatal forward: `encode_batch` is inside upstream SGLang TP
+    collectives. A rank-local OOM / CUDA / NCCL exception can leave peer
+    ranks blocked in NCCL, so a CPU `all_gather_object` after the
+    exception is not safe. The rank that catches the exception must exit
+    non-zero immediately. `MultiProcessPipelineRunner._monitor_children`
+    observes `StageGroup.any_dead()` and tears down the whole TP group.
+  - Recoverable post-forward: `slice_results` runs only on the entry rank
+    after `encode_batch` returned on all ranks. It can emit
+    per-request errors locally and continue; no TP peer is waiting on a
+    matching collective at that point.
 - **Pre-broadcast entry-rank failures**: `_recv_messages` does H2D
   copies inside `_strip_and_lift` *before* the metadata broadcast. A
   failure there (OOM, dtype coercion, malformed payload) on the
@@ -2180,10 +2208,17 @@ Rules:
   returns `(local, exc)`. Followers detect the dict by kind-string
   equality (not identity — pickle round-trip would break that) and
   return `([], RuntimeError(...))`. Both ranks then converge on the
-  scheduler's per-iteration `all_gather_object` handshake without
+  scheduler's pre-forward `all_gather_object` handshake without
   ever crashing the scheduler thread. No new control channel, no
   runner-level rescue, no `Stage._handle_scheduler_crash` (the
   stage-level abort path) involvement.
+- **Fatal forward failures require coordinator fail-all plumbing.**
+  Current `StageGroup.any_dead()` only reports a non-zero child exit
+  (`pipeline/stage_group.py:130-132`), and `MultiProcessPipelineRunner`
+  currently responds by calling `stop()` (`pipeline/mp_runner.py:332-342`).
+  Phase 0 must make that path fail all active Coordinator futures /
+  stream queues with a non-empty error before shutdown, otherwise
+  outstanding HTTP requests can hang after the TP group is killed.
 - No adapter may return a fake-success embedding (zero tensor, empty list,
   etc.). v1's broader refactor explicitly disallows that pattern.
 
@@ -2243,12 +2278,13 @@ config just sets `backend="sglang"` and `tp_size`.
 4. Validate parity: `backend="local"` vs `backend="sglang", tp_size=1` on
    the same input. Then bump `tp_size`.
 
-Everything else (`Stage`, `StageGroup`, `Coordinator`, `relay`,
-`EncoderScheduler` itself) is reused without modification.
-`MultiProcessPipelineRunner` and `pipeline/stage_process.py` get the
-small launcher extension described in [Required launcher
-change](#required-launcher-change), which is a one-time addition that
-all sglang-backed encoder stages share.
+After Phase 0, everything else (`Stage`, `StageGroup`, `Coordinator`,
+`relay`, `EncoderScheduler` itself) is reused by new models without
+model-specific modification. `MultiProcessPipelineRunner`, Coordinator
+failure plumbing, and `pipeline/stage_process.py` get the small launcher /
+fatal-path extension described in
+[Required launcher change](#required-launcher-change), which is a one-time
+addition that all sglang-backed encoder stages share.
 
 ## Implementation Plan
 
@@ -2285,8 +2321,15 @@ Phase 0 — landing path that doesn't break v1:
      rejects any TP stage whose factory does not accept
      `tp_rank/tp_size/nccl_port`; Layer 2 rejects encoder TP stages
      whose resolved backend is not `"sglang"`.
+   - In `MultiProcessPipelineRunner._monitor_children`, when
+     `StageGroup.any_dead()` reports a non-zero child exit, fail all
+     active Coordinator futures / stream queues with a non-empty
+     stage-group fatal error before `stop()` tears down the remaining
+     ranks. This is the required fatal path for `encode_batch()` faults:
+     the scheduler intentionally exits the process instead of attempting
+     an unsafe post-forward CPU gather.
 
-   These six sub-steps are the load-bearing prerequisite for Phase 1's
+   These seven sub-steps are the load-bearing prerequisite for Phase 1's
    `tp_size=1, gpu!=0` parity lane to validate the right thing — see
    [GPU placement across `tp_size=1` and `tp_size>1` lanes](#gpu-placement-across-tp_size1-and-tp_size1-lanes)
    and [Required launcher change](#required-launcher-change).
@@ -2363,7 +2406,7 @@ Phase 0 — landing path that doesn't break v1:
      rank does **not** issue any `dist.broadcast(t, group=device_group)`
      call (use a mock that records calls); (b) follower returns
      `(messages, error)` from `_recv_messages` instead of raising;
-     (c) both ranks reach the unified `all_gather_object` handshake
+     (c) both ranks reach the pre-forward `all_gather_object` handshake
      with `local_err is not None` on the follower side; (d) the
      entry rank's drained `local` is forwarded via the tuple return,
      so `_emit_error(messages, ...)` produces one error message per
@@ -2380,14 +2423,31 @@ Phase 0 — landing path that doesn't break v1:
      rank's `messages` equals the drained list for the collect-failure
      variant, follower's `messages` is `[]`, follower's exception text
      quotes the entry-rank exception via `repr(exc)`; (c) the
-     scheduler's `all_gather_object` handshake observes both ranks as
-     failed and emits exactly one `OutgoingMessage(type="error")` per
-     drained request on the entry rank (i.e.
+     scheduler's pre-forward `all_gather_object` handshake observes the
+     recv failure and emits exactly one `OutgoingMessage(type="error")`
+     per drained request on the entry rank (i.e.
      `len(error_emissions) == len(drained_messages)`, not 0 and not 2×
      from double-counting); (d) the scheduler thread stays alive and
      proceeds to the next loop iteration — `Stage._handle_scheduler_crash`
      must not fire. Locks the tagged-dict sentinel contract and the
      recv-error tuple return.
+   - **Pre-forward build error recovery**: fake
+     `adapter.build_batch(messages)` to raise on one rank before
+     `encode_batch` is called. Assert all ranks enter the pre-forward
+     `all_gather_object` handshake, no rank calls `worker.encode_batch`,
+     the entry rank emits one `OutgoingMessage(type="error")` per
+     drained request, and the scheduler proceeds to the next iteration.
+     This locks the boundary between recoverable adapter shape errors
+     and fatal TP model-forward errors.
+   - **Fatal TP forward fault**: fake `worker.encode_batch(plan)` so one
+     rank raises after the other rank has entered a mocked device
+     collective. Assert the failing rank calls `_fatal_tp_forward_error`
+     / exits non-zero instead of entering the CPU pre-forward gather,
+     `StageGroup.any_dead()` becomes true, `MultiProcessPipelineRunner`
+     terminates the peer process, and all active Coordinator futures /
+     stream queues are failed with a non-empty stage-group fatal error.
+     This test must explicitly reject "scheduler keeps running and emits
+     request-level errors" for forward-time TP faults.
    - **AR-only knob protection — helper level**: directly call
      `build_sglang_encoder_server_args(model_path=..., tp_size=1,
      base_gpu_id=0, dist_init_addr="...", mem_fraction_static=0.5)`
@@ -2526,9 +2586,16 @@ Minimum lanes (unit + GPU + E2E):
     End-to-end waveform produced, no OOM.
 
 - **Fault injection**
-  - Force encoder OOM (oversized pixel batch) and verify the request fails
-    through `Coordinator` with HTTP 500 and a non-empty error body.
-    Specifically reject:
+  - Force a recoverable pre-forward encoder OOM / malformed payload
+    (`_recv_messages`, tensor allocation, or `build_batch`) and verify
+    the request fails through `Coordinator` with HTTP 500 and a non-empty
+    error body while the scheduler keeps serving later requests.
+  - Force a rank-local `encode_batch` TP forward fault and verify the
+    rank exits non-zero, peers are terminated by `StageGroup`, and all
+    active Coordinator futures / streams fail with a non-empty fatal
+    error instead of hanging. This is a stage-group fatal path, not a
+    request-level recovery path.
+  - Specifically reject:
     - `data=None` "success" coming back from `code2wav` (Ming-Omni shape).
     - zero-tensor "success" coming back from talker (current Qwen3-Omni
       shape in the bug discussed in #302).
