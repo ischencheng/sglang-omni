@@ -65,7 +65,7 @@ QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER = 5
 class RequestSpan:
     """Per-request slice of one BatchPlan.
 
-    Exactly one of ``skip_result`` or the active counters is meaningful.
+    Exactly one of ``skip_result`` or the active fields below is populated.
     """
 
     request_id: str

@@ -33,6 +33,12 @@ from pathlib import Path
 
 import pytest
 
+# All tests in this module load the full Qwen3-Omni model — mark them
+# slow so the local CPU-only CI gate (``pytest -m "not slow"``) skips
+# the whole file. CI runners that don't have the checkpoint cached fall
+# through to the module-level ``pytest.skip`` below.
+pytestmark = pytest.mark.slow
+
 torch = pytest.importorskip("torch")
 
 if not torch.cuda.is_available():
