@@ -24,10 +24,9 @@ HTTP API -> Client -> Coordinator -> StageGroup -> Stage(leader)
                                                 v
                                   SGLangEncoderWorker (one per rank)
                                                 v
-                              upstream SGLang encoder model
-                                  thinker.get_image_feature
-                                  thinker.get_video_feature
-                                  thinker.get_audio_feature
+                              upstream SGLang encoder submodule(s)
+                                  Qwen3OmniMoeVisionEncoder
+                                  Qwen3OmniMoeAudioEncoder
 ```
 
 The public pipeline topology stays the same:
@@ -40,7 +39,7 @@ Only the implementation behind encoder stages changes:
 
 ```text
 old:  Stage -> SimpleScheduler -> Qwen3OmniImageEncoder (HF copy)
-new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream model.thinker.get_image_feature
+new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream encoder submodule
 ```
 
 ### Layer Responsibilities
@@ -52,9 +51,9 @@ new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream model.thinker
 | `Stage` (`single/leader/follower`) | Control plane, relay IO, input aggregation, stream routing, scheduler in/out queues, leader-only outbound traffic | None |
 | `TPLeaderFanout` / `TPFollowerControlPlane` | Mirror leader-side `Shutdown/Profiler/Abort` to followers via mp.Queue | None |
 | **`EncoderScheduler`** | TP-aware non-AR scheduling loop: drain inbox on entry rank, broadcast **metadata** to followers via TP CPU group, broadcast **tensor data** to followers via TP device group, run worker on every rank, emit downstream traffic only on entry rank | **New** |
-| **`SGLangEncoderWorker`** | Initialize SGLang distributed state (always — even at `tp_size=1`), build encoder-only `ModelConfig`, load upstream encoder model via `get_model`, expose `encode_batch()` | **New** |
-| **`Qwen3OmniEncoderAdapter`** | v1 `PipelineState.encoder_inputs` <-> upstream `MultimodalDataItem` <-> v1 `encoder_outs`, with explicit `BatchPlan` for multi-request batching | **New** |
-| upstream SGLang model | Owns encoder modules, native `ColumnParallelLinear` / `RowParallelLinear`, weight sharding, NCCL collectives | **Reused** |
+| **`SGLangEncoderWorker`** | Initialize SGLang distributed state (always — even at `tp_size=1`), build encoder-only `ModelConfig`, instantiate only the upstream encoder submodules declared by the adapter, partial-load matching checkpoint prefixes, expose `encode_batch()` | **New** |
+| **`Qwen3OmniEncoderAdapter`** | v1 `PipelineState.encoder_inputs` <-> upstream `MultimodalDataItem` <-> v1 `encoder_outs`, with explicit `BatchPlan` and `EncoderModuleSpec` declarations | **New** |
+| upstream SGLang encoder modules | Own encoder kernels, native `ColumnParallelLinear` / `RowParallelLinear`, weight sharding, NCCL collectives | **Reused** |
 
 > Note (Cheng): the table separates *Stage* from *Scheduler*. `Stage` already
 > supports the `single/leader/follower` split; we are adding a new scheduler
@@ -101,8 +100,29 @@ Three observations from the code walk drive Plan B:
 
 The missing pieces are therefore one new scheduler shape (`EncoderScheduler`)
 that owns metadata + tensor broadcast, and one minimal SGLang worker
-(`SGLangEncoderWorker`) that owns the distributed init and the upstream
-model. Everything else is reuse.
+(`SGLangEncoderWorker`) that owns the distributed init plus partial
+encoder-submodule loading. "Reuse upstream" means reuse SGLang's TP runtime,
+loader machinery, and encoder module implementations — not instantiate the
+full upstream `ForConditionalGeneration` entry class inside every encoder
+stage.
+
+### Upstream Reuse Boundary
+
+Plan B reuses upstream at the **right granularity**:
+
+- Reused directly: SGLang distributed init, TP groups, TP-aware layers,
+  loader selection, quantization / load-format hooks, remote weight loading,
+  and upstream encoder submodule classes.
+- Declared locally: which encoder submodules a stage needs, which checkpoint
+  prefixes map to those submodules, and how v1 `PipelineState` becomes the
+  upstream `MultimodalDataItem` shape.
+- Not reused in encoder workers: the full upstream
+  `ForConditionalGeneration` class. That class is the serving entry point for
+  full generation and can allocate language-model / talker modules that an
+  encoder stage must never own.
+
+This keeps Plan B aligned with the original goal — inherit upstream TP and
+model kernels — while avoiding duplicate full-model weight residency.
 
 ### Evidence From Code Walk
 
@@ -120,6 +140,7 @@ model. Everything else is reuse.
 | Current Qwen3-Omni encoder factories build local HF towers under `SimpleScheduler` | `sglang_omni_v1/models/qwen3_omni/stages.py:704-783` |
 | Local v1 encoder copies that should disappear after parity | `sglang_omni_v1/models/qwen3_omni/components/{image_encoder.py,audio_encoder.py}` |
 | Upstream `Qwen3OmniMoeThinkerForConditionalGeneration` exposes `get_audio_feature` and inherits `get_image_feature` / `get_video_feature` from Qwen3-VL | `sglang-workspace/sglang/python/sglang/srt/models/qwen3_omni_moe.py:438-492`, `sglang/python/sglang/srt/models/qwen3_vl.py:1193-1226` |
+| The full Qwen3-Omni entry class constructs a thinker, and the thinker constructs language + audio + vision modules; loading that in an encoder stage duplicates thinker weights and can OOM | `sglang-workspace/sglang/python/sglang/srt/models/qwen3_omni_moe.py:441-456, 495-507` |
 | Upstream Qwen3-Omni audio encoder uses `ColumnParallelLinear` + `RowParallelLinear` — TP comes for free | `sglang/python/sglang/srt/models/qwen3_omni_moe.py:49-124` |
 | `MMEncoder.__init__` is the canonical encoder-only init sequence and **always** initializes distributed, regardless of `tp_size` | `sglang/python/sglang/srt/disaggregation/encode_server.py:184-244` |
 | `get_tp_group()` asserts `_TP is not None` — every model that uses `ColumnParallelLinear` / `RowParallelLinear` requires `initialize_model_parallel()` to have run, including at `tp_size=1` | `sglang/python/sglang/srt/distributed/parallel_state.py:1476-1483` |
@@ -168,15 +189,14 @@ sglang_omni_v1/
               | server_args      |         | build_batch(msgs) ->  |
               | model_config     |         |   BatchPlan           |
               | tp_group         |         | run_feature(model,    |
-              | model            |         |   plan) -> raw        |
+              | encoder modules  |         |   plan) -> raw        |
               | encode_batch()   |         | slice_results(raw,    |
               +--------+---------+         |   plan, msgs) -> ...  |
                        |                   +-----------------------+
                        v
-            upstream SGLang Qwen3-Omni model
-            thinker.get_image_feature
-            thinker.get_video_feature
-            thinker.get_audio_feature
+            upstream SGLang encoder submodules
+            Qwen3OmniMoeVisionEncoder
+            Qwen3OmniMoeAudioEncoder
 ```
 
 ## Inputs Across TP Ranks
@@ -871,7 +891,16 @@ non-upstreamed encoders.
 **not** start `MMEncoder` or any HTTP server: v1 already owns
 preprocessing, control plane, relay, request lifecycle, and cache metadata.
 The worker only owns SGLang's distributed state and the loaded upstream
-encoder model.
+encoder submodules for the current stage.
+
+Important boundary: encoder workers must **not** instantiate the upstream
+full `ForConditionalGeneration` class. For Qwen3-Omni,
+`Qwen3OmniMoeForConditionalGeneration` constructs a thinker, and the
+thinker constructs language + audio + vision modules. Loading that in the
+encoder stage duplicates the same thinker weights the thinker stage already
+loads and can OOM before any request runs. Plan B reuses upstream at the
+submodule level (`Qwen3OmniMoeVisionEncoder`,
+`Qwen3OmniMoeAudioEncoder`) plus SGLang TP/loading infrastructure.
 
 ### What we reuse from upstream
 
@@ -889,9 +918,66 @@ calls, not the surrounding ZMQ/cache/transfer-engine machinery):
   distributed_init_method=..., local_rank=...)`
 - `initialize_model_parallel(tensor_model_parallel_size=tp_size)`
 - `initialize_dp_attention(server_args, model_config)`
-- `get_model(model_config=..., load_config=..., device_config=...)`
+- `get_model_loader(load_config, model_config)` and the same checkpoint
+  iterator / loader family, but applied to an encoder-only module container
+  rather than to the full upstream model entry class
 - `get_tp_group()` for the TP CPU + device groups used by
   `EncoderScheduler`.
+
+### EncoderModuleSpec
+
+Every SGLang-backed encoder stage provides a tiny module declaration. This
+is the only model-specific part of the worker; it says which upstream
+encoder submodules to instantiate and which checkpoint prefixes belong to
+them. The shared worker handles distributed init, `ServerArgs`, `ModelConfig`,
+`LoadConfig`, checkpoint iteration, protected override checks, and device
+placement.
+
+```python
+@dataclass(frozen=True)
+class EncoderModuleSpec:
+    name: str
+    build_module: Callable[[Any, QuantizationConfig | None], nn.Module]
+    checkpoint_prefixes: tuple[str, ...]
+    checkpoint_rewrites: tuple[tuple[str, str], ...] = ()
+```
+
+For Qwen3-Omni the image stage declares only the visual tower, and the
+audio stage declares only the audio tower:
+
+```python
+QWEN3_OMNI_VISUAL_SPEC = EncoderModuleSpec(
+    name="visual",
+    build_module=lambda hf, quant_config: Qwen3OmniMoeVisionEncoder(
+        hf.thinker_config.vision_config,
+        quant_config=quant_config,
+        norm_eps=getattr(hf.thinker_config, "rms_norm_eps", 1e-6),
+        prefix="visual",
+    ),
+    checkpoint_prefixes=("model.visual.", "thinker.visual.", "visual."),
+    checkpoint_rewrites=(
+        ("model.visual.", "visual."),
+        ("thinker.visual.", "visual."),
+        ("attn.qkv.", "attn.qkv_proj."),
+        ("attn.out_proj.", "attn.proj."),
+    ),
+)
+
+QWEN3_OMNI_AUDIO_SPEC = EncoderModuleSpec(
+    name="audio_tower",
+    build_module=lambda hf, quant_config: Qwen3OmniMoeAudioEncoder(
+        hf.thinker_config.audio_config
+    ),
+    checkpoint_prefixes=("audio_tower.", "thinker.audio_tower."),
+    checkpoint_rewrites=(("thinker.audio_tower.", "audio_tower."),),
+)
+```
+
+This does mean every model contributes a small `encoder_adapters.py`, but it
+does **not** mean every model forks a full encoder implementation. The
+model-specific code is metadata plus shape conversion. The math kernels,
+parallel linear layers, weight loaders, quantization hooks, and module
+definitions remain upstream SGLang code.
 
 ### GPU placement across `tp_size=1` and `tp_size>1` lanes
 
@@ -1187,6 +1273,7 @@ class SGLangEncoderWorker:
         nccl_port: int | None,
         dtype: str | None = None,
         load_format: str | None = None,
+        encoder_specs: Sequence[EncoderModuleSpec],
         server_args_overrides: dict[str, Any] | None = None,
     ):
         self.tp_rank = tp_rank
@@ -1281,7 +1368,15 @@ class SGLangEncoderWorker:
         initialize_dp_attention(server_args, self.model_config)
         self.tp_group = get_tp_group()
 
-        self.model = get_model(
+        self.model = EncoderModuleContainer(
+            self.model_config.hf_config,
+            encoder_specs=encoder_specs,
+            quant_config=_get_quantization_config(
+                self.model_config, self.load_config
+            ),
+        ).to(self.device)
+        self._load_encoder_weights(
+            self.model,
             model_config=self.model_config,
             load_config=self.load_config,
             device_config=DeviceConfig(device="cuda", gpu_id=cuda_device),
@@ -1291,6 +1386,48 @@ class SGLangEncoderWorker:
     def encode_batch(self, plan: "BatchPlan") -> Any:
         return plan.adapter.run_feature(self.model, plan)
 ```
+
+`_load_encoder_weights` follows the upstream loader path for the selected
+`LoadConfig`, but filters the checkpoint stream by the module specs before
+calling `model.load_weights(filtered_weights)`. It must not materialize the
+full upstream model just to reuse its `load_weights` method. The local
+container implements only the prefix rewrites and `param.weight_loader`
+dispatch needed by the declared encoder modules.
+
+```python
+class EncoderModuleContainer(nn.Module):
+    def __init__(self, hf_config, encoder_specs, quant_config):
+        super().__init__()
+        self.specs = {spec.name: spec for spec in encoder_specs}
+        for spec in encoder_specs:
+            module = spec.build_module(hf_config, quant_config)
+            self.add_module(spec.name, module)
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            mapped = self._map_checkpoint_name(name)
+            if mapped is None or mapped not in params:
+                continue
+            param = params[mapped]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+
+    def _map_checkpoint_name(self, name: str) -> str | None:
+        for spec in self.specs.values():
+            if not name.startswith(spec.checkpoint_prefixes):
+                continue
+            mapped = name
+            for old, new in spec.checkpoint_rewrites:
+                mapped = mapped.replace(old, new)
+            return mapped
+        return None
+```
+
+The container is intentionally small. It is not a new model implementation:
+it has no language model, no logits head, no talker, no generation path, and
+no scheduler state. It only gives SGLang's loader a parameter namespace that
+contains the selected upstream encoder submodules.
 
 ### `build_sglang_encoder_server_args`
 
@@ -1338,7 +1475,7 @@ _ENCODER_PROTECTED_KEYS = frozenset({
     "base_gpu_id",
     "nccl_port",
     "dist_init_addr",
-    # Encoder-only fork
+    # Encoder worker invariants
     "encoder_only",
     "language_only",
     "mm_enable_dp_encoder",
@@ -1418,8 +1555,10 @@ The protected-key reject covers:
   Phase 0 starts exactly `StageConfig.tp_size` local ranks; DP, EP,
   attention-CP, and multinode shapes are out of scope and cannot be
   activated through `server_args_overrides`.
-- `encoder_only` / `language_only` — flipping these would route through
-  a different upstream model factory and break the whole RFC.
+- `encoder_only` / `language_only` — the worker no longer relies on the
+  full upstream model factory for the encoder-vs-language split. Letting
+  users flip these through overrides would make `ServerArgs` disagree with
+  the module specs the worker actually loads.
 - `mm_enable_dp_encoder` — Phase 0–2 require encoder TP only; allowing
   this through `overrides` would silently violate the rejection rule
   the factory layer also enforces.
@@ -1553,8 +1692,8 @@ that:
 - `run_feature` sees only active items, with the option of an empty list.
   When the entire batch is skip-only (e.g. a text-only batch arriving at
   audio_encoder during co-routing), `run_feature` returns
-  `{"image": None, "video": None, "audio": None}` and never calls into
-  the upstream model.
+  `{"image": None, "video": None, "audio": None}` and never calls into an
+  upstream encoder submodule.
 - `slice_results` returns the preserved `skip_result` for skip requests
   and slices the raw embedding for active requests.
 
@@ -1687,11 +1826,11 @@ def run_feature(self, model, plan):
     if plan.is_empty:
         return {"image": None, "video": None, "audio": None}
     image_embed = (
-        model.thinker.get_image_feature(plan.image_items)
+        self._get_image_feature(model.visual, plan.image_items)
         if plan.image_items else None
     )
     video_embed = (
-        model.thinker.get_video_feature(plan.video_items)
+        self._get_video_feature(model.visual, plan.video_items)
         if plan.video_items else None
     )
     return {"image": image_embed, "video": video_embed, "audio": None}
@@ -1727,12 +1866,14 @@ def slice_results(self, raw, plan, messages):
 moved into `encoder_adapters.py` so the SGLang path does not depend on
 private helpers in `stages.py`.
 
-> Note (Cheng): we deliberately keep `get_image_feature` and
-> `get_video_feature` as separate calls. Upstream
+> Note (Cheng): the adapter keeps image and video feature extraction as
+> separate helper calls. Upstream
 > `Qwen3VLMoeForConditionalGeneration` exposes them as two methods
 > (`qwen3_vl.py:1193, 1212`), and PR #14907 (chunked vit attention) hooks
 > into them at this granularity. Fusing them would silently break that
-> hook.
+> hook. Phase 0 mirrors those method bodies around the loaded
+> `Qwen3OmniMoeVisionEncoder` submodule; an upstream helper can remove
+> that small wrapper later.
 
 ### Audio adapter
 
@@ -1824,7 +1965,7 @@ def build_batch(self, messages):
 def run_feature(self, model, plan):
     if plan.is_empty:
         return {"image": None, "video": None, "audio": None}
-    embed = model.thinker.get_audio_feature(plan.audio_items)
+    embed = self._get_audio_feature(model.audio_tower, plan.audio_items)
     return {"image": None, "video": None, "audio": embed}
 
 
@@ -1943,14 +2084,15 @@ def create_image_encoder_executor(
 ):
     chosen = _resolve_backend(backend, model_path, stage="image_encoder")
     if chosen == "sglang":
+        adapter = Qwen3OmniImageEncoderAdapter(...)
         worker = SGLangEncoderWorker(
             model_path=model_path,
             gpu_id=gpu_id, tp_rank=tp_rank, tp_size=tp_size, nccl_port=nccl_port,
             dtype=dtype,
             load_format=load_format,
+            encoder_specs=adapter.encoder_specs,
             server_args_overrides=server_args_overrides,
         )
-        adapter = Qwen3OmniImageEncoderAdapter(...)
         return EncoderScheduler(
             worker=worker,
             adapter=adapter,
@@ -1995,9 +2137,9 @@ Upstream SGLang `Qwen3VLMoeVisionModel.__init__`
 (`sglang/python/sglang/srt/models/qwen3_vl.py:334-336`) instead writes
 `self.out_hidden_size = vision_config.out_hidden_size * (1 + len(deepstack_visual_indexes))`
 — deepstack is **already folded** into the wrapper's
-`out_hidden_size`. Reading `model.thinker.visual.out_hidden_size` and
-also multiplying by `(1 + deepstack_layers)` would count deepstack
-twice and produce a budget cap roughly `(1 + deepstack)^2 / (1 + deepstack)`
+`out_hidden_size`. Reading the wrapper's `visual.out_hidden_size` and also
+multiplying by `(1 + deepstack_layers)` would count deepstack twice and
+produce a budget cap roughly `(1 + deepstack)^2 / (1 + deepstack)`
 times too tight, starving long-video batches.
 
 **Resolution.** The SGLang adapter takes its cost metadata directly
@@ -2039,10 +2181,11 @@ The audio adapter's `request_cost_fn` returns 0 in Phase 0 (no v1 audio
 cost model yet), and `max_batch_cost` defaults to None — same admission
 shape as the local audio path today.
 
-`backend="auto"` resolves to `"sglang"` if the upstream model registers a
-matching encoder adapter and `tp_size == 1` baseline parity has passed; else
-`"local"`. `tp_size > 1` is only accepted for `backend="sglang"` in the
-MVP. `backend="local"` with `tp_size > 1` raises a config error.
+`backend="auto"` resolves to `"sglang"` if the model package ships a matching
+encoder adapter / `EncoderModuleSpec` set and `tp_size == 1` baseline parity
+has passed; else `"local"`. `tp_size > 1` is only accepted for
+`backend="sglang"` in the MVP. `backend="local"` with `tp_size > 1` raises a
+config error.
 
 ## TP Launch Lifecycle
 
@@ -2065,9 +2208,11 @@ For `image_encoder` with `tp_size=2`, end to end:
 7. `SGLangEncoderWorker.__init__` always calls
    `init_distributed_environment(world_size=2, rank=tp_rank,
    distributed_init_method=f"tcp://127.0.0.1:{nccl_port}")`,
-   `initialize_model_parallel(tensor_model_parallel_size=2)`, then
-   `get_model(...)`. Two processes meet on the NCCL port and form the TP
-   group. **At `tp_size=1` the same calls run with `world_size=1, rank=0,
+   `initialize_model_parallel(tensor_model_parallel_size=2)`, then builds
+   the `EncoderModuleContainer` from the adapter's `EncoderModuleSpec`
+   list and partial-loads only the matching checkpoint prefixes. Two
+   processes meet on the NCCL port and form the TP group. **At
+   `tp_size=1` the same calls run with `world_size=1, rank=0,
    distributed_init_method=tcp://127.0.0.1:<free_port>`.**
 8. `Stage.run()` starts. Leader binds the ZMQ recv endpoint; follower binds
    `TPFollowerControlPlane`. Both spawn a scheduler thread.
@@ -2263,21 +2408,25 @@ Fish stays on `SimpleScheduler` for preprocessing and `OmniScheduler` for
 
 ### Future MiMo / Ming-Omni
 
-Same pattern as Qwen3-Omni. As long as the upstream SGLang model registers
-encoder methods (`get_image_feature`, etc.) and ships a small
-`encoder_adapters.py` in `sglang_omni_v1/models/<name>/`, the pipeline
-config just sets `backend="sglang"` and `tp_size`.
+Same pattern as Qwen3-Omni. As long as upstream SGLang exposes the encoder
+submodule classes and those modules use SGLang's TP-aware layers, the model
+ships a small `encoder_adapters.py` in `sglang_omni_v1/models/<name>/` with
+`EncoderModuleSpec` declarations and payload transforms. The pipeline config
+then just sets `backend="sglang"` and `tp_size`.
 
 ## Adding A New Model
 
-1. Add `models/<name>/encoder_adapters.py`. Implement `build_batch`,
-   `run_feature`, `slice_results` for each encoder stage.
+1. Add `models/<name>/encoder_adapters.py`. Declare the
+   `EncoderModuleSpec` list for each encoder stage and implement
+   `build_batch`, `run_feature`, `slice_results`.
 2. In `models/<name>/stages.py`, branch the encoder factory on `backend`:
    `"sglang"` builds `EncoderScheduler(SGLangEncoderWorker(...), adapter)`;
    `"local"` keeps the existing `SimpleScheduler` path.
 3. In `models/<name>/config.py` (the `PipelineConfig`), set `tp_size` and
    `gpu=[...]` on the encoder stage.
-4. Validate parity: `backend="local"` vs `backend="sglang", tp_size=1` on
+4. Validate that the SGLang backend loads only the declared encoder
+   prefixes (no language model / talker parameters in the encoder worker).
+5. Validate parity: `backend="local"` vs `backend="sglang", tp_size=1` on
    the same input. Then bump `tp_size`.
 
 After Phase 0, everything else (`Stage`, `StageGroup`, `Coordinator`,
@@ -2485,11 +2634,17 @@ Phase 0 — landing path that doesn't break v1:
      GPU placement through `server_args_overrides` instead of
      `StageConfig.tp_size` / `StageConfig.gpu`.
 2. Add `sglang_omni_v1/model_runner/sglang_encoder_worker.py`. Behind
-   `backend="sglang"` only — never the default in this PR.
+   `backend="sglang"` only — never the default in this PR. The worker
+   builds `EncoderModuleContainer` from adapter-provided
+   `EncoderModuleSpec`s and partial-loads matching checkpoint prefixes;
+   it must not call `get_model()` on the full upstream
+   `ForConditionalGeneration` class.
 3. Add `sglang_omni_v1/scheduling/encoder_scheduler.py` including the
    two-channel `_recv_messages` and the `BatchPlan` plumbing.
 4. Add `sglang_omni_v1/models/qwen3_omni/encoder_adapters.py` (image +
-   audio).
+   audio), including the visual/audio `EncoderModuleSpec`s and tests that
+   the image stage does not load `audio_tower`/LLM/talker weights and the
+   audio stage does not load visual/LLM/talker weights.
 5. Update `create_image_encoder_executor()` and
    `create_audio_encoder_executor()` to accept `backend`, `tp_rank`,
    `tp_size`, `nccl_port`, `load_format`, `server_args_overrides`. Default
@@ -2572,6 +2727,10 @@ Minimum lanes (unit + GPU + E2E):
     that on the entry rank the metadata pickle does not contain tensor
     payload bytes, while followers reconstruct identical
     `IncomingMessage` objects after `dist.broadcast`.
+  - `EncoderModuleContainer.load_weights` filters checkpoint keys by
+    `EncoderModuleSpec`: image stage accepts only visual prefixes, audio
+    stage accepts only audio prefixes, and synthetic LLM / talker /
+    unrelated encoder keys are skipped without allocation.
 
 - **GPU**
   - Qwen3-Omni image encoder: `backend="local"` vs `backend="sglang",
@@ -2610,16 +2769,26 @@ Minimum lanes (unit + GPU + E2E):
 
 ## Open Questions
 
-1. **Upstream `EncoderModelWorker` helper.** Should we push the eight-call
-   init sequence (`set_global_server_args_for_scheduler` → `ModelConfig` →
-   `LoadConfig` → `init_distributed_environment` →
-   `initialize_model_parallel` → `initialize_dp_attention` → `get_model`
-   → expose `tp_group`) into SGLang main as a public helper class? That
-   would delete `SGLangEncoderWorker.__init__` and remove the only place
-   v1 reads into upstream `MMEncoder` internals. Recommended: file an
-   upstream issue after Phase 1 lands, propose
-   `sglang.srt.disaggregation.EncoderModelWorker`, driven by SGLang-Omni
-   as the first consumer.
+1. **Upstream `EncoderModelWorker` / partial encoder loader helper.**
+   Should we push the shared init + partial-load sequence
+   (`set_global_server_args_for_scheduler` → `ModelConfig` → `LoadConfig`
+   → `init_distributed_environment` → `initialize_model_parallel` →
+   `initialize_dp_attention` → instantiate declared encoder submodules →
+   load matching checkpoint prefixes → expose `tp_group`) into SGLang main
+   as a public helper class? That would delete most of
+   `SGLangEncoderWorker.__init__` and remove the only place v1 reads into
+   upstream `MMEncoder` / model-loader internals. The upstream helper should
+   **not** call `get_model()` on the full `ForConditionalGeneration` class;
+   it should be a first-class encoder-submodule loader. Recommended: land
+   the local helper in Phase 0, then file an upstream issue after Phase 1
+   passes, propose `sglang.srt.disaggregation.EncoderModelWorker`, driven by
+   SGLang-Omni as the first consumer.
+
+   Note (Chencheng): This partial encoder loader should eventually be
+   upstreamed to SGLang. For now, we keep it in SGLang-Omni to unblock
+   development and validation. Once the upstream `EncoderModelWorker` /
+   partial encoder loader lands, Omni should replace the local helper with
+   the upstream API.
 
 2. **DP encoder vs TP encoder.** Upstream `mm_enable_dp_encoder` works for
    Qwen2.5-VL (#13126 merged) and Qwen3-VL (#13724 merged) but Qwen3-Omni
