@@ -12,7 +12,7 @@ docker run -it --shm-size 32g --gpus all frankleeeee/sglang-omni:dev /bin/zsh
 ```bash
 git clone https://github.com/sgl-project/sglang-omni.git
 cd sglang-omni
-uv venv .venv -p 3.12 && source .venv/bin/activate
+uv venv .venv -p 3.13 && source .venv/bin/activate
 uv pip install -v .
 ```
 
@@ -112,6 +112,10 @@ print(result["choices"][0]["message"]["content"])
 ### Video and Audio Input
 
 Send a video with a spoken audio question. The model watches the video, hears the question, and responds with text.
+
+The Video-AMME CI benchmark uses this same modality combination: video input
+plus a spoken question/options WAV, with only routing and answer-format
+instructions in the text message.
 
 **cURL**
 

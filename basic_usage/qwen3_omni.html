@@ -58,7 +58,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.1.0" />
-    <meta name="docbuild:last-update" content="Apr 24, 2026"/>
+    <meta name="docbuild:last-update" content="May 09, 2026"/>
   </head>
   
   
@@ -432,7 +432,7 @@ docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </s
 </div>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/sgl-project/sglang-omni.git
 <span class="nb">cd</span><span class="w"> </span>sglang-omni
-uv<span class="w"> </span>venv<span class="w"> </span>.venv<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span>.12<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+uv<span class="w"> </span>venv<span class="w"> </span>.venv<span class="w"> </span>-p<span class="w"> </span><span class="m">3</span>.13<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
 uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-v<span class="w"> </span>.
 </pre></div>
 </div>
@@ -525,6 +525,9 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <section id="video-and-audio-input">
 <h3>Video and Audio Input<a class="headerlink" href="#video-and-audio-input" title="Link to this heading">#</a></h3>
 <p>Send a video with a spoken audio question. The model watches the video, hears the question, and responds with text.</p>
+<p>The Video-AMME CI benchmark uses this same modality combination: video input
+plus a spoken question/options WAV, with only routing and answer-format
+instructions in the text message.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
@@ -930,7 +933,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Apr 24, 2026.
+  Last updated on May 09, 2026.
   <br/>
 </p>
   </div>
