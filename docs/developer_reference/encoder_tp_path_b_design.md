@@ -659,7 +659,9 @@ def start(self) -> None:
                     self._emit_error(messages, recv_err)
                 continue
         if not messages:
-            self._idle_check()
+            # _collect_batch_from_inbox -> _next_message uses a blocking
+            # inbox.get(timeout=...) so an idle loop already throttles
+            # itself, same as SimpleScheduler. No separate idle helper.
             continue
 
         plan = None
@@ -1576,7 +1578,7 @@ class _TensorSpec:
 class RequestSpan:
     """Slot for one request inside a batch.
 
-    Exactly one of skip_result or active_offsets is populated.
+    Exactly one of `skip_result` or the active fields below is populated.
     """
     request_id: str
     skip_result: dict | None = None        # preserved from preprocessor _skip
@@ -2601,7 +2603,8 @@ Minimum lanes (unit + GPU + E2E):
       shape in the bug discussed in #302).
 
 - **Reuse existing CI**
-  - The existing thinker / talker CI (test_qwen3_omni_v1_*.py) must pass
+  - The existing thinker / talker CI (test_v1_qwen3_omni_*.py and the
+    related test_v1_talker_*.py / test_v1_omni_scheduler.py files) must pass
     unchanged in `backend="local"` mode in Phase 0 and `backend="sglang"`
     mode in Phase 2.
 
