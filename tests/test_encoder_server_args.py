@@ -110,6 +110,15 @@ _PARALLELISM = [
     ("moe_dense_tp_size", 2),
     ("nnodes", 2),
     ("node_rank", 1),
+    # RFC v2: rank-topology keys reachable through `**overrides`.
+    # `tp_rank`, `gpu_id`, `nccl_port`, `rank`, `world_size` must not
+    # be settable through server_args_overrides because the runner
+    # already decided them from StageConfig.tp_size + StageConfig.gpu.
+    ("tp_rank", 1),
+    ("gpu_id", 7),
+    ("nccl_port", 29500),
+    ("rank", 1),
+    ("world_size", 4),
 ]
 
 # Encoder-only fork knobs.

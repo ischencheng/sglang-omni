@@ -40,7 +40,14 @@ def build_sglang_server_args(
 # fork. See encoder_tp_path_b_design.md "GPU placement..." and
 # "AR-only knob protection".
 _ENCODER_PROTECTED_KEYS = frozenset({
-    # Parallelism / placement
+    # Parallelism / placement / rank topology.
+    # For encoder stages, rank topology has exactly one source of truth:
+    # StageConfig.tp_size + StageConfig.gpu, materialized by the runner
+    # into per-rank kwargs. server_args_overrides is only for safe
+    # SGLang loading/runtime knobs (quantization, attention backend,
+    # remote weight loading); it must not be able to change rank
+    # topology or GPU placement after the runner has already spawned
+    # processes.
     "tp_size",
     "pp_size",
     "dp_size",
@@ -48,7 +55,12 @@ _ENCODER_PROTECTED_KEYS = frozenset({
     "moe_dense_tp_size",
     "nnodes",
     "node_rank",
+    "rank",
+    "world_size",
+    "tp_rank",
+    "gpu_id",
     "base_gpu_id",
+    "nccl_port",
     "dist_init_addr",
     # Encoder-only fork
     "encoder_only",

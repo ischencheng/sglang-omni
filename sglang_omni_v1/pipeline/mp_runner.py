@@ -420,10 +420,27 @@ class MultiProcessPipelineRunner:
         while self._started:
             for group in self._groups:
                 if group.any_dead():
+                    summary = group.dead_summary()
                     logger.error(
-                        "Dead stage process(es) detected: %s",
-                        group.dead_summary(),
+                        "Dead stage process(es) detected: %s", summary
                     )
+                    # Fail every outstanding Coordinator future / stream
+                    # before tearing down the rest. Required by the
+                    # encoder TP fatal-forward path: when a TP rank
+                    # exits non-zero (e.g. encode_batch raised inside
+                    # SGLang TP collectives), peer ranks may still be in
+                    # NCCL — the runner cannot recover, but it must not
+                    # leave HTTP requests hanging on completions that
+                    # will never arrive.
+                    if self._coordinator is not None:
+                        try:
+                            self._coordinator.fail_all_active(
+                                f"stage group {group.stage_name!r} died: {summary}"
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "fail_all_active raised during monitor shutdown"
+                            )
                     await self.stop()
                     return
             await asyncio.sleep(5.0)

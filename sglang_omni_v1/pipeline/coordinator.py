@@ -104,6 +104,67 @@ class Coordinator:
             except Exception as e:
                 logger.warning("Failed to send shutdown to stage %s: %s", name, e)
 
+    def fail_all_active(self, error: str) -> None:
+        """Resolve every active completion future / stream queue with a fatal error.
+
+        Required by the encoder TP fatal-forward path: when any TP rank
+        exits non-zero (e.g. ``encode_batch`` raised inside SGLang TP
+        collectives), :class:`MultiProcessPipelineRunner` calls this
+        before tearing down the remaining processes. Without it, the
+        outstanding HTTP requests sit forever waiting on completions
+        that will never arrive.
+
+        Safe to call multiple times: each future / queue is only
+        resolved once. ``error`` should be a non-empty human-readable
+        string — empty error bodies cause downstream consumers (Client,
+        OpenAI shim) to mis-classify the failure as success.
+        """
+        if not error:
+            error = "stage process died with non-zero exit"
+
+        for request_id, future in list(self._completion_futures.items()):
+            if not future.done():
+                try:
+                    future.set_exception(RuntimeError(error))
+                except asyncio.InvalidStateError:
+                    pass
+            self._completion_futures.pop(request_id, None)
+
+        for request_id, queue in list(self._stream_queues.items()):
+            try:
+                queue.put_nowait(
+                    CompleteMessage(
+                        request_id=request_id,
+                        from_stage="coordinator",
+                        success=False,
+                        error=error,
+                    )
+                )
+            except asyncio.QueueFull:
+                # Stream consumers are async; if the queue is somehow
+                # full, drop the older items rather than block here.
+                logger.warning(
+                    "Stream queue full while failing req=%s; dropping head",
+                    request_id,
+                )
+
+        # Mark requests as failed for visibility on the health endpoint.
+        for info in self._requests.values():
+            if info.state in (
+                RequestState.COMPLETED,
+                RequestState.FAILED,
+                RequestState.ABORTED,
+            ):
+                continue
+            info.state = RequestState.FAILED
+
+        logger.error(
+            "Coordinator failed %d active future(s) and %d stream(s): %s",
+            len(self._requests),
+            len(self._stream_queues),
+            error,
+        )
+
     async def submit(self, request_id: str, request: OmniRequest | Any) -> Any:
         """Submit a request to the pipeline and wait for completion."""
         await self._submit_request(request_id, request)

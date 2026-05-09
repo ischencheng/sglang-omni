@@ -34,6 +34,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import os
 import queue as _queue_mod
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -131,61 +132,138 @@ class EncoderScheduler:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Run the scheduler loop on the current thread."""
+        """Run the scheduler loop on the current thread.
+
+        Three error domains, not one catch-all:
+
+        1. **Recoverable pre-forward** (``_recv_messages``,
+           ``build_batch``): both synchronize through the TP CPU group
+           via :meth:`_gather_pre_forward_error` *before* any model
+           collective starts. On any rank failure, the entry rank emits
+           one ``OutgoingMessage(type="error")`` per drained request and
+           every rank ``continue``s into the next loop iteration.
+
+        2. **Fatal forward** (``encode_batch``): once we've entered
+           upstream SGLang TP collectives (``ColumnParallelLinear``,
+           ``RowParallelLinear``, NCCL), one rank cannot safely recover
+           with a CPU gather — peers may still be blocked in NCCL. The
+           rank that observes the exception calls
+           :meth:`_fatal_tp_forward_error`, which exits the process
+           non-zero so ``StageGroup`` / ``MultiProcessPipelineRunner``
+           tears down the whole TP group and the runner's monitor fails
+           outstanding Coordinator futures.
+
+        3. **Recoverable post-forward** (``slice_results``): runs only
+           on the entry rank after ``encode_batch`` returned on every
+           rank. It can emit per-request errors locally and continue.
+        """
         self._running = True
         while self._running:
             messages, recv_err = self._recv_messages()
-            local_err: BaseException | None = recv_err
-            results: list | None = None
-
-            if recv_err is None and not messages:
-                continue
-
-            if recv_err is None:
-                try:
-                    plan = self.adapter.build_batch(messages)
-                    raw = self.worker.encode_batch(plan)
-                    if self.worker.is_entry_rank:
-                        results = self.adapter.slice_results(raw, plan, messages)
-                except Exception as exc:  # noqa: BLE001
-                    local_err = exc
-                    if self.worker.is_entry_rank:
-                        logger.exception(
-                            "EncoderScheduler forward/build/slice failed",
-                        )
-
-            if self.worker.tp_size > 1:
-                err_flags: list[bool] = [False] * self.worker.tp_size
-                dist.all_gather_object(
-                    err_flags,
-                    local_err is not None,
-                    group=self.worker.tp_group.cpu_group,
-                )
-                any_err = any(err_flags)
-            else:
-                any_err = local_err is not None
-
-            if any_err:
+            if self._gather_pre_forward_error(recv_err):
                 if self.worker.is_entry_rank:
                     self._emit_error(
                         messages,
-                        local_err
-                        if local_err is not None
-                        else RuntimeError("peer-rank encoder forward failed"),
+                        recv_err
+                        if recv_err is not None
+                        else RuntimeError("peer-rank encoder recv failed"),
+                    )
+                continue
+            if not messages:
+                continue
+
+            plan = None
+            build_err: BaseException | None = None
+            try:
+                plan = self.adapter.build_batch(messages)
+            except Exception as exc:  # noqa: BLE001
+                build_err = exc
+
+            if self._gather_pre_forward_error(build_err):
+                if self.worker.is_entry_rank:
+                    self._emit_error(
+                        messages,
+                        build_err
+                        if build_err is not None
+                        else RuntimeError("peer-rank encoder build_batch failed"),
                     )
                 continue
 
-            if self.worker.is_entry_rank and results is not None:
-                for msg, out in zip(messages, results):
-                    if msg.request_id in self._aborted_request_ids:
-                        continue
-                    self.outbox.put(
-                        OutgoingMessage(
-                            request_id=msg.request_id,
-                            type="result",
-                            data=out,
-                        )
+            try:
+                raw = self.worker.encode_batch(plan)
+            except Exception as exc:  # noqa: BLE001
+                # Production: _fatal_tp_forward_error calls os._exit(1)
+                # and never returns; the runner's _monitor_children
+                # then fails outstanding Coordinator futures.
+                # Tests: monkey-patched fatal handler returns. In that
+                # case we exit the loop cleanly without re-raising —
+                # re-raising would crash the scheduler thread, which
+                # under Stage._handle_scheduler_crash would tear down
+                # the stage even in tests where we want to assert state
+                # post-fault.
+                self._fatal_tp_forward_error(exc)
+                self._running = False
+                return
+
+            if not self.worker.is_entry_rank:
+                continue
+
+            try:
+                results = self.adapter.slice_results(raw, plan, messages)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("EncoderScheduler slice_results failed")
+                self._emit_error(messages, exc)
+                continue
+
+            for msg, out in zip(messages, results):
+                if msg.request_id in self._aborted_request_ids:
+                    continue
+                self.outbox.put(
+                    OutgoingMessage(
+                        request_id=msg.request_id,
+                        type="result",
+                        data=out,
                     )
+                )
+
+    def _gather_pre_forward_error(
+        self,
+        local_err: BaseException | None,
+    ) -> bool:
+        """Synchronize recoverable recv/build errors before model collectives.
+
+        Returns True iff *any* rank reported a failure. The TP CPU group
+        gather marshals only a picklable boolean — the exception object
+        stays local, so each rank emits its own request-level error.
+        """
+        if self.worker.tp_size <= 1:
+            return local_err is not None
+        err_flags: list[bool] = [False] * self.worker.tp_size
+        dist.all_gather_object(
+            err_flags,
+            local_err is not None,
+            group=self.worker.tp_group.cpu_group,
+        )
+        return any(err_flags)
+
+    def _fatal_tp_forward_error(self, error: BaseException) -> None:
+        """Exit non-zero after a TP forward fault.
+
+        Once ``encode_batch`` has entered upstream SGLang TP collectives,
+        a rank-local exception cannot be recovered through a post-hoc CPU
+        gather: peers may still be blocked in NCCL and never reach the
+        gather. Force a child-process failure so
+        :class:`MultiProcessPipelineRunner` tears down the whole TP group
+        and fails outstanding Coordinator futures from the parent side.
+
+        Overridable by tests via monkey-patch (the test stub records the
+        error and *does* return so the test runner can assert on it).
+        """
+        logger.exception(
+            "Fatal TP encoder forward failure on rank %d/%d: %r",
+            self.worker.tp_rank, self.worker.tp_size, error,
+        )
+        os._exit(1)
 
     def stop(self) -> None:
         self._running = False
