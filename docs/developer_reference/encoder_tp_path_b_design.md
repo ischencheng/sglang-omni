@@ -294,6 +294,29 @@ from sglang_omni_v1.pipeline.relay_io import extract_tensors, restore_tensors
 _RECV_ERROR_KIND = "encoder_recv_error"  # picklable string tag
 
 
+class BatchCollectError(RuntimeError):
+    """Batch admission failed after draining one or more messages."""
+
+    def __init__(self, messages: list[IncomingMessage], error: BaseException):
+        super().__init__(str(error))
+        self.messages = messages
+        self.error = error
+
+
+def _collect_batch_or_error(
+    self,
+) -> tuple[list[IncomingMessage], BaseException | None]:
+    """Collect a batch without letting admission-control errors escape."""
+    try:
+        return self._collect_batch_from_inbox(), None
+    except BatchCollectError as exc:
+        return exc.messages, exc.error
+    except Exception as exc:                          # noqa: BLE001
+        # No request was safely captured. This path should only cover
+        # queue/runtime bugs outside request_cost_fn.
+        return [], exc
+
+
 def _recv_messages(
     self,
 ) -> tuple[list[IncomingMessage], BaseException | None]:
@@ -309,14 +332,13 @@ def _recv_messages(
     get_video_feature() only call .type(dtype), not .to(device).
     """
     if self.worker.tp_size == 1:
-        # Cost-capped collect — same admission control SimpleScheduler
-        # uses (max_batch_size / max_batch_wait_ms / max_batch_cost).
-        # The TP path needs identical caps, otherwise long-video
-        # batches that the local image encoder rejects today would
-        # silently flow through and OOM in _strip_and_lift or forward.
-        local = self._collect_batch_from_inbox()
-        if not local:
-            return local, None
+        # Cost-capped collect uses adapter request_cost_fn, so it is
+        # part of the recv error boundary rather than a guaranteed-safe
+        # prelude. This keeps request-level error semantics even in the
+        # tp_size == 1 lane.
+        local, collect_err = self._collect_batch_or_error()
+        if collect_err is not None or not local:
+            return local, collect_err
         try:
             meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(local)
         except Exception as exc:                          # noqa: BLE001
@@ -330,13 +352,22 @@ def _recv_messages(
         # Cost cap runs on the entry rank only — the broadcast below
         # ships the entry rank's already-bounded `local` list to
         # followers, so all ranks see the same admission decision.
-        local = self._collect_batch_from_inbox()
-        # _collect_batch_from_inbox is queue gets + cost-cap arithmetic
-        # — no device work, no failure mode worth handshaking.
+        local, collect_err = self._collect_batch_or_error()
+        if collect_err is not None:
+            # request_cost_fn is adapter/model code. Treat admission
+            # failures as pre-metadata recv failures, otherwise
+            # followers block forever in broadcast_pyobj waiting for a
+            # metadata payload that the entry rank never sends.
+            broadcast_pyobj(
+                [{"kind": _RECV_ERROR_KIND, "error": repr(collect_err)}],
+                tp.rank, tp.cpu_group, src=src_rank,
+            )
+            return local, collect_err
+
         # _strip_and_lift does the H2D copy + dtype coercion that can
-        # OOM / TypeError; that's the failure we have to tell followers
-        # about *before* the metadata broadcast, otherwise they block
-        # on it forever and the runner can't see it
+        # OOM / TypeError; it must also fail through the same sentinel
+        # path *before* the metadata broadcast, otherwise followers
+        # block on it forever and the runner can't see it
         # (mp_runner.py:332-342 only catches exit-code failures).
         try:
             meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(local)
@@ -685,7 +716,11 @@ def _collect_batch_from_inbox(self) -> list[IncomingMessage]:
         return [first]
 
     batch = [first]
-    batch_cost = self._message_cost(first)
+    try:
+        batch_cost = self._message_cost(first)
+    except Exception as exc:                    # noqa: BLE001
+        raise BatchCollectError(batch, exc) from exc
+
     deadline = time.monotonic() + self._max_batch_wait_s
     while len(batch) < self._max_batch_size:
         try:
@@ -702,7 +737,15 @@ def _collect_batch_from_inbox(self) -> list[IncomingMessage]:
             self._pending_messages.append(msg)
             continue
         if self._max_batch_cost is not None:
-            cost = self._message_cost(msg)
+            try:
+                cost = self._message_cost(msg)
+            except Exception as exc:            # noqa: BLE001
+                # The message has already been drained from the queue.
+                # Include it in the failed recv iteration so the entry
+                # rank can emit one request-level error for it instead
+                # of silently dropping it.
+                batch.append(msg)
+                raise BatchCollectError(batch, exc) from exc
             if batch_cost + cost > self._max_batch_cost:
                 self._pending_messages.appendleft(msg)
                 break
@@ -721,6 +764,16 @@ intentionally so, to keep parity with the local fallback. The cost
 function takes a `StagePayload` and returns a byte estimate; it is the
 same `_create_image_encoder_request_cost_fn(model)` pattern v1 already
 uses (`models/qwen3_omni/stages.py:144-166`).
+
+Because `request_cost_fn` is adapter/model code, `_message_cost()` is not
+treated as infallible queue arithmetic. If it raises, `_collect_batch_from_inbox`
+raises `BatchCollectError(messages, cause)` with every message already
+drained in this iteration. `_recv_messages()` converts that into its
+normal `(messages, error)` return; in TP mode, the entry rank also sends
+the same `_RECV_ERROR_KIND` sentinel used for `_strip_and_lift` failures
+before followers wait for metadata. That preserves both properties we
+need: no request is silently dropped, and followers never block forever
+on a metadata broadcast that the entry rank skipped.
 
 ### Where admission control runs in `_recv_messages`
 
@@ -2295,22 +2348,25 @@ Phase 0 — landing path that doesn't break v1:
      so `_emit_error(messages, ...)` produces one error message per
      drained request. Locks the `_allocation_ready_gather` contract.
    - **Pre-broadcast error sentinel (`_recv_messages` deadlock guard)**:
-     run `EncoderScheduler` with `tp_size=2` and a fake `_strip_and_lift`
-     that raises on the entry rank before the metadata
-     `broadcast_pyobj`. Assert (a) the follower rank does **not**
-     block on `broadcast_pyobj` indefinitely (bounded-time wait with
-     fail-on-timeout); (b) `_recv_messages` returns `(messages, exc)`
-     on **both** ranks rather than raising — entry rank's `messages`
-     equals the drained list, follower's `messages` is `[]`,
-     follower's exception text quotes the entry-rank exception via
-     `repr(exc)`; (c) the scheduler's `all_gather_object` handshake
-     observes both ranks as failed and emits exactly one
-     `OutgoingMessage(type="error")` per drained request on the
-     entry rank (i.e. `len(error_emissions) == len(drained_messages)`,
-     not 0 and not 2× from double-counting); (d) the scheduler thread
-     stays alive and proceeds to the next loop iteration —
-     `Stage._handle_scheduler_crash` must not fire. Locks the
-     tagged-dict sentinel contract and the recv-error tuple return.
+     run `EncoderScheduler` with `tp_size=2` in two entry-rank failure
+     variants before the metadata `broadcast_pyobj`: (1) fake
+     `request_cost_fn` raises inside `_collect_batch_from_inbox` after
+     draining at least one request; (2) fake `_strip_and_lift` raises
+     after batch collection succeeds. Assert (a) the follower rank does
+     **not** block on `broadcast_pyobj` indefinitely (bounded-time wait
+     with fail-on-timeout); (b) `_recv_messages` returns
+     `(messages, exc)` on **both** ranks rather than raising — entry
+     rank's `messages` equals the drained list for the collect-failure
+     variant, follower's `messages` is `[]`, follower's exception text
+     quotes the entry-rank exception via `repr(exc)`; (c) the
+     scheduler's `all_gather_object` handshake observes both ranks as
+     failed and emits exactly one `OutgoingMessage(type="error")` per
+     drained request on the entry rank (i.e.
+     `len(error_emissions) == len(drained_messages)`, not 0 and not 2×
+     from double-counting); (d) the scheduler thread stays alive and
+     proceeds to the next loop iteration — `Stage._handle_scheduler_crash`
+     must not fire. Locks the tagged-dict sentinel contract and the
+     recv-error tuple return.
    - **AR-only knob protection — helper level**: directly call
      `build_sglang_encoder_server_args(model_path=..., tp_size=1,
      base_gpu_id=0, dist_init_addr="...", mem_fraction_static=0.5)`
