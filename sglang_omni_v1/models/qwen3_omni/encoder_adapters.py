@@ -300,28 +300,33 @@ class Qwen3OmniImageEncoderAdapter:
             n_img = n_vid = 0
             img_tokens = vid_tokens = 0
             if isinstance(inputs.get("pixel_values"), torch.Tensor):
-                grid = inputs["image_grid_thw"]
+                # _strip_and_lift moved every tensor in the payload tree to
+                # cuda:0. For grid_thw that is wrong: upstream
+                # ``compute_cu_seqlens_from_grid_numpy`` asserts a CPU tensor
+                # (sglang/python/sglang/srt/models/utils.py:154). Move it
+                # back to CPU so the upstream model never sees a CUDA grid.
+                grid = inputs["image_grid_thw"].to(dtype=torch.long, device="cpu")
                 it = MultimodalDataItem(
                     modality=Modality.IMAGE,
                     feature=inputs["pixel_values"],
                 )
-                it.image_grid_thw = grid.to(dtype=torch.long)
+                it.image_grid_thw = grid
                 images.append(it)
                 n_img = int(grid.shape[0])
                 img_tokens = int(
-                    (grid.to(dtype=torch.long).prod(-1) // self._merge).sum().item()
+                    (grid.prod(-1) // self._merge).sum().item()
                 )
             if isinstance(inputs.get("pixel_values_videos"), torch.Tensor):
-                grid = inputs["video_grid_thw"]
+                grid = inputs["video_grid_thw"].to(dtype=torch.long, device="cpu")
                 v = MultimodalDataItem(
                     modality=Modality.VIDEO,
                     feature=inputs["pixel_values_videos"],
                 )
-                v.video_grid_thw = grid.to(dtype=torch.long)
+                v.video_grid_thw = grid
                 videos.append(v)
                 n_vid = int(grid.shape[0])
                 vid_tokens = int(
-                    (grid.to(dtype=torch.long).prod(-1) // self._merge).sum().item()
+                    (grid.prod(-1) // self._merge).sum().item()
                 )
             spans.append(
                 RequestSpan(

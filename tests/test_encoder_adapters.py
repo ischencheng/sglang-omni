@@ -121,6 +121,52 @@ def test_image_adapter_build_batch_image_plus_video_same_request():
     assert span.image_rows == 1 and span.video_rows == 1
 
 
+def test_image_adapter_build_batch_keeps_grid_thw_on_cpu():
+    """Locks the [grid_thw must stay on CPU] contract.
+
+    After ``EncoderScheduler._strip_and_lift`` lifts every payload tensor
+    to ``cuda:0``, the adapter must move ``image_grid_thw`` /
+    ``video_grid_thw`` *back* to CPU before handing items to the upstream
+    model. Upstream ``compute_cu_seqlens_from_grid_numpy`` asserts
+    ``grid_thw.device.type == "cpu"`` (sglang/python/sglang/srt/models/utils.py:154);
+    the v1 SGLang Plan B path discovered this end-to-end in the docs CI
+    run.
+
+    We simulate the post-lift state by feeding a CPU input here (the
+    upstream path is the same — adapter normalizes to CPU regardless of
+    incoming device, so the contract is enforced).
+    """
+    adapter = Qwen3OmniImageEncoderAdapter(
+        hf_config=_hf_cfg(), dtype=torch.float16
+    )
+    grid = torch.tensor([[1, 4, 4]], dtype=torch.long)
+    pixel = torch.zeros(16, 6)
+    msg = _msg("r0", {
+        "image_encoder": {
+            "pixel_values": pixel,
+            "image_grid_thw": grid,
+        }
+    })
+    plan = adapter.build_batch([msg])
+    assert plan.image_items[0].image_grid_thw.device.type == "cpu"
+
+
+def test_video_adapter_build_batch_keeps_grid_thw_on_cpu():
+    adapter = Qwen3OmniImageEncoderAdapter(
+        hf_config=_hf_cfg(), dtype=torch.float16
+    )
+    grid = torch.tensor([[1, 2, 2]], dtype=torch.long)
+    pixel = torch.zeros(4, 6)
+    msg = _msg("r0", {
+        "image_encoder": {
+            "pixel_values_videos": pixel,
+            "video_grid_thw": grid,
+        }
+    })
+    plan = adapter.build_batch([msg])
+    assert plan.video_items[0].video_grid_thw.device.type == "cpu"
+
+
 def test_image_adapter_build_batch_skip_request():
     adapter = Qwen3OmniImageEncoderAdapter(
         hf_config=_hf_cfg(), dtype=torch.float16
