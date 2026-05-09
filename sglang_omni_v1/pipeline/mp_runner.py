@@ -17,6 +17,7 @@ import socket
 from typing import Any
 
 from sglang_omni_v1.config.compiler import (
+    _TP_LAUNCH_PARAMS,
     _allocate_endpoints,
     _build_relay_config,
     _detect_same_gpu_targets,
@@ -32,9 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Backends that require per-process CUDA isolation and a real distributed init.
 _SGLANG_BACKENDS = frozenset({"sglang", "auto"})
-
-# TP launch kwargs the runner injects into stage factories.
-_TP_LAUNCH_PARAMS = frozenset({"tp_rank", "tp_size", "nccl_port"})
 
 
 def _resolved_backend(stage_cfg: StageConfig, config: PipelineConfig) -> str:

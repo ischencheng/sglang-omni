@@ -17,6 +17,16 @@ from sglang_omni_v1.utils import import_string
 
 _SGLANG_BACKENDS = frozenset({"sglang", "auto"})
 
+# Launch-topology kwargs the runner is the sole source of truth for. Users
+# express TP through ``StageConfig.tp_size``; mp_runner translates that into
+# per-rank ``tp_rank`` + ``tp_size`` + ``nccl_port`` and injects them into
+# ``factory_args`` at spawn time. Letting these flow through user
+# ``factory_args`` / ``runtime_overrides`` creates a silent desync: e.g.
+# ``StageConfig.tp_size=1`` + ``factory_args[tp_size]=2`` spawns one process
+# but boots SGLangEncoderWorker with ``world_size=2``, hanging NCCL bootstrap
+# forever waiting for the missing rank 1.
+_TP_LAUNCH_PARAMS = frozenset({"tp_rank", "tp_size", "nccl_port"})
+
 
 def compile_pipeline(config: PipelineConfig) -> tuple[Coordinator, list[Stage]]:
     """Build the coordinator and stage objects from the pipeline configuration."""
@@ -190,6 +200,22 @@ def _resolve_factory_args(
     stage_overrides = global_cfg.runtime_overrides.get(stage_cfg.name, {})
     if stage_overrides:
         args.update(stage_overrides)
+
+    # TP launch topology has exactly one source of truth: StageConfig.tp_size.
+    # Users CAN override TP — they just have to do it through the StageConfig
+    # field, not through factory_args / runtime_overrides. Letting these slip
+    # through creates the silent NCCL-bootstrap-hang bug described in
+    # _TP_LAUNCH_PARAMS above.
+    leaked = sorted(_TP_LAUNCH_PARAMS & args.keys())
+    if leaked:
+        raise ValueError(
+            f"Stage {stage_cfg.name!r}: factory_args / runtime_overrides "
+            f"cannot set {leaked}. These keys are managed by the pipeline "
+            f"runner from StageConfig.tp_size and the per-stage NCCL port "
+            f"allocator. To override TP size, edit StageConfig.tp_size "
+            f"(and StageConfig.gpu) directly."
+        )
+
     factory = import_string(stage_cfg.factory)
     sig = inspect.signature(factory)
 

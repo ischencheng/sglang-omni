@@ -384,3 +384,71 @@ def test_real_factory_signature_lock_audio_encoder():
 
     sig = inspect.signature(create_audio_encoder_executor)
     assert sig.parameters["backend"].default == "local"
+
+
+# ---------------------------------------------------------------------------
+# 7. TP launch params reject (footgun in user-supplied factory_args /
+# runtime_overrides — Codex adversarial review finding)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key,value", [
+    ("tp_size", 2),
+    ("tp_rank", 1),
+    ("nccl_port", 29500),
+])
+def test_resolve_factory_args_rejects_tp_launch_params_in_factory_args(key, value):
+    """Lock the TP topology source-of-truth contract.
+
+    ``StageConfig.tp_size`` is the only public way to set TP size.
+    Letting ``factory_args[tp_size]=N`` slip through while
+    ``StageConfig.tp_size`` says 1 (or vice versa) silently desyncs
+    the runner's spawn count from the worker's NCCL world size,
+    hanging bootstrap. ``_resolve_factory_args`` must reject these
+    keys with a clear error before any spec is built.
+    """
+    from sglang_omni_v1.config.compiler import _resolve_factory_args
+
+    cfg = _make_config(
+        factory=_F_SGLANG,
+        factory_args={"backend": "sglang", key: value},
+    )
+    with pytest.raises(ValueError, match=key):
+        _resolve_factory_args(cfg.stages[0], cfg)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("tp_size", 2),
+    ("tp_rank", 1),
+    ("nccl_port", 29500),
+])
+def test_resolve_factory_args_rejects_tp_launch_params_in_runtime_overrides(key, value):
+    """Same as above but via ``runtime_overrides`` (the CLI-friendly path)."""
+    from sglang_omni_v1.config.compiler import _resolve_factory_args
+
+    cfg = _make_config(
+        factory=_F_SGLANG,
+        factory_args={"backend": "sglang"},
+        runtime_overrides={"image_encoder": {key: value}},
+    )
+    with pytest.raises(ValueError, match=key):
+        _resolve_factory_args(cfg.stages[0], cfg)
+
+
+def test_user_supplied_tp_size_in_factory_args_blocks_at_build_stage_groups():
+    """End-to-end regression: the silent NCCL-bootstrap-hang scenario.
+
+    User sets ``StageConfig.tp_size=1`` (default) and
+    ``factory_args={"backend":"sglang","tp_size":2}``. Pre-fix, the
+    runner spawned one process but the factory got tp_size=2, hanging
+    NCCL forever. Post-fix, ``_build_stage_groups`` raises before any
+    spawn.
+    """
+    cfg = _make_config(
+        factory=_F_SGLANG,
+        factory_args={"backend": "sglang", "tp_size": 2},
+        # NOTE: StageConfig.tp_size defaults to 1 — the bug surface.
+    )
+    ctx = multiprocessing.get_context("spawn")
+    with pytest.raises(ValueError, match="tp_size"):
+        _build_stage_groups(cfg, ctx=ctx)
