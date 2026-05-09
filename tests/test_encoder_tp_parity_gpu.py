@@ -80,9 +80,17 @@ if _MODEL_PATH is None:
 
 @pytest.fixture(scope="module")
 def sglang_image_worker_tp1():
-    """Build a single-rank SGLang encoder worker on cuda:0."""
+    """Build a single-rank SGLang encoder worker on cuda:0.
+
+    Loads ONLY the visual encoder submodule (not the full thinker /
+    talker), per the partial-load contract. Footprint should be ~1-2
+    GB instead of ~57 GB for the full Qwen3-Omni-30B model.
+    """
     from sglang_omni_v1.model_runner.sglang_encoder_worker import (
         SGLangEncoderWorker,
+    )
+    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
+        Qwen3OmniImageEncoderAdapter,
     )
 
     worker = SGLangEncoderWorker(
@@ -91,6 +99,7 @@ def sglang_image_worker_tp1():
         tp_rank=0,
         tp_size=1,
         nccl_port=None,
+        encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
         dtype="float16",
     )
     yield worker
@@ -100,9 +109,52 @@ def test_sglang_worker_pin_cuda_zero_at_tp_size_1(sglang_image_worker_tp1):
     worker = sglang_image_worker_tp1
     # The launcher remap pins us to one visible GPU as cuda:0.
     assert worker.device == torch.device("cuda:0")
-    # The model lives on cuda:0 from get_model(...).
+    # The visual submodule (and its params) lives on cuda:0.
     p = next(worker.model.parameters())
     assert p.device.index == 0
+
+
+def test_partial_load_visual_only_no_thinker_no_talker(sglang_image_worker_tp1):
+    """Locks the partial-load contract.
+
+    The container must hold ONLY the visual submodule. Any
+    LLM/talker/audio module on an image-stage worker means we
+    silently re-introduced the full-model load that the partial loader
+    was built to avoid.
+    """
+    worker = sglang_image_worker_tp1
+    children = dict(worker.model.named_children())
+    assert set(children) == {"visual"}, (
+        f"image-stage container should hold only 'visual', got {sorted(children)}"
+    )
+
+    # The visual submodule itself should not contain any sub-attribute
+    # that looks like a language-model layer or talker block.
+    forbidden = {"thinker", "talker", "audio_tower", "lm_head", "embed_tokens"}
+    for name, _ in worker.model.named_modules():
+        for f in forbidden:
+            assert f not in name.split("."), (
+                f"image-stage container leaked module {name!r}, "
+                f"forbidden component {f!r} should not be present"
+            )
+
+
+def test_partial_load_visual_footprint_under_5gb(sglang_image_worker_tp1):
+    """The visual encoder alone should fit comfortably in <5 GB on
+    fp16. Pre-partial-load we'd see ~57 GB here from the full
+    Qwen3-Omni-30B thinker. Use a generous bound so the test isn't
+    flaky on minor revisions; the regression we care about (loading
+    the full thinker) blows past 5 GB by an order of magnitude.
+    """
+    worker = sglang_image_worker_tp1
+    total_bytes = sum(
+        p.numel() * p.element_size() for p in worker.model.parameters()
+    )
+    total_gb = total_bytes / (1024 ** 3)
+    assert total_gb < 5.0, (
+        f"visual-only encoder is using {total_gb:.2f} GB; the full thinker "
+        f"would land ~57 GB here. Did the partial-load contract regress?"
+    )
 
 
 def test_sglang_worker_world_group_local_rank_zero(sglang_image_worker_tp1):

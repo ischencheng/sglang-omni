@@ -844,17 +844,11 @@ def _build_sglang_encoder_scheduler(
     )
     from sglang_omni_v1.scheduling.encoder_scheduler import EncoderScheduler
 
-    worker = SGLangEncoderWorker(
-        model_path=model_path,
-        gpu_id=gpu_id,
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        nccl_port=nccl_port,
-        dtype=dtype,
-        load_format=load_format,
-        server_args_overrides=server_args_overrides,
-    )
-
+    # Build the adapter FIRST so we can read its declared
+    # ``encoder_specs`` and pass them to the worker. The worker no
+    # longer falls back to ``get_model()`` on the full upstream
+    # ForConditionalGeneration class — it requires the adapter's
+    # spec list to know which submodules to load.
     hf_thinker_config = load_thinker_config(model_path)
     torch_dtype = _resolve_dtype(dtype)
 
@@ -866,6 +860,18 @@ def _build_sglang_encoder_scheduler(
         adapter = Qwen3OmniAudioEncoderAdapter(
             hf_config=hf_thinker_config, dtype=torch_dtype
         )
+
+    worker = SGLangEncoderWorker(
+        model_path=model_path,
+        gpu_id=gpu_id,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        nccl_port=nccl_port,
+        encoder_specs=adapter.encoder_specs,
+        dtype=dtype,
+        load_format=load_format,
+        server_args_overrides=server_args_overrides,
+    )
 
     return EncoderScheduler(
         worker=worker,

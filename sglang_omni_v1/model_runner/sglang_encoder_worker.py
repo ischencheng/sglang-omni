@@ -1,24 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal SGLang-native encoder worker.
+"""Minimal SGLang-native encoder worker with partial encoder loading.
 
 Owns SGLang's distributed init, encoder-only ``ServerArgs`` /
-``ModelConfig`` / ``LoadConfig``, the loaded upstream encoder model,
-and exposes ``encode_batch()``. Does not start the upstream
-``MMEncoder`` (no ZMQ, no transfer engine, no embedding cache) — v1
-already owns request lifecycle, control plane, and relay.
+``ModelConfig`` / ``LoadConfig``, and a small ``EncoderModuleContainer``
+that holds *only* the upstream encoder submodules an adapter declared
+through its :class:`EncoderModuleSpec` list. The worker NEVER calls
+``get_model()`` on the full upstream ``ForConditionalGeneration``
+class — for Qwen3-Omni that would instantiate the thinker LLM (~57 GB
+fp16) and the talker on every encoder GPU, which both wastes memory
+and OOMs on H100-class hardware.
 
-See ``docs/developer_reference/encoder_tp_path_b_design.md`` for the
-full RFC. The init sequence mirrors
-``sglang/python/sglang/srt/disaggregation/encode_server.py`` so it
-inherits SGLang's TP + native encoder implementations.
+What the worker does inherit from upstream:
+    - SGLang distributed init / TP groups
+    - SGLang loader pipeline (``DefaultModelLoader._get_all_weights``,
+      ``load_weights_and_postprocess``)
+    - SGLang TP-aware layers used inside the upstream encoder modules
+      (``ColumnParallelLinear`` / ``RowParallelLinear``, fused
+      attention, etc.)
+
+What the worker brings:
+    - The :class:`EncoderModuleContainer` with adapter-supplied
+      submodules and a prefix-filtering ``load_weights``.
+
+See ``docs/developer_reference/encoder_tp_path_b_design.md`` →
+"Upstream Reuse Boundary" / "EncoderModuleSpec".
 """
 from __future__ import annotations
 
 import logging
 import socket
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import torch
+import torch.nn as nn
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
@@ -29,13 +43,18 @@ from sglang.srt.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from sglang.srt.layers.dp_attention import initialize_dp_attention
-from sglang.srt.model_loader import get_model
+from sglang.srt.model_loader import get_model_loader
+from sglang.srt.model_loader.loader import DefaultModelLoader
+from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.server_args import set_global_server_args_for_scheduler
 
 from sglang_omni_v1.scheduling.sglang_backend import build_sglang_encoder_server_args
 
 if TYPE_CHECKING:
-    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import BatchPlan
+    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
+        BatchPlan,
+        EncoderModuleSpec,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +76,178 @@ def _pick_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def _resolve_quant_config(model_config: ModelConfig, load_config: LoadConfig) -> Any:
+    """Best-effort accessor for the model's quantization config.
+
+    Different SGLang versions surface this in different places; encoder
+    submodule constructors that accept a ``quant_config`` will work fine
+    with ``None`` (unquantized), so we return ``None`` if we can't find
+    one.
+    """
+    del load_config  # not currently consumed; reserved for future loaders
+    qc = getattr(model_config, "quantization_config", None)
+    if qc is not None:
+        return qc
+    return getattr(model_config, "quant_config", None)
+
+
+class EncoderModuleContainer(nn.Module):
+    """Module holder for partial encoder loading.
+
+    Builds only the submodules declared by the supplied
+    :class:`EncoderModuleSpec` list. Provides a ``load_weights`` method
+    that:
+
+    - Filters incoming ``(name, tensor)`` pairs by each spec's
+      ``checkpoint_prefixes`` — anything that doesn't match any spec
+      is dropped without allocating a destination tensor.
+    - Applies each spec's ``checkpoint_rewrites`` to map upstream
+      checkpoint key names onto this container's parameter namespace.
+    - Dispatches to ``param.weight_loader`` (set by SGLang's TP-aware
+      layers) when present, otherwise falls back to
+      ``default_weight_loader`` so unfused params still copy correctly.
+
+    The container is intentionally lean: no language model, no logits
+    head, no talker, no generation path, no scheduler state. Its sole
+    job is to give SGLang's loader a parameter namespace that contains
+    the selected encoder submodules and nothing else.
+    """
+
+    def __init__(
+        self,
+        hf_config: Any,
+        *,
+        encoder_specs: Sequence["EncoderModuleSpec"],
+        quant_config: Any,
+    ) -> None:
+        super().__init__()
+        if not encoder_specs:
+            raise ValueError(
+                "EncoderModuleContainer requires at least one EncoderModuleSpec; "
+                "the encoder adapter must declare its upstream submodules."
+            )
+        names = [spec.name for spec in encoder_specs]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                f"EncoderModuleSpec names must be unique within a stage: {names}"
+            )
+
+        self._specs: dict[str, "EncoderModuleSpec"] = {}
+        for spec in encoder_specs:
+            module = spec.build_module(hf_config, quant_config)
+            self.add_module(spec.name, module)
+            self._specs[spec.name] = spec
+
+    # -- Loader entry point -------------------------------------------------
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
+        """SGLang loader hook — filter, rewrite, and dispatch.
+
+        Two-stage dispatch:
+
+        1. Group the incoming stream by spec using
+           ``checkpoint_prefixes``. Anything that doesn't match any spec
+           is dropped without allocating.
+        2. Per submodule:
+           - If the submodule has its own ``load_weights`` (e.g.
+             ``Qwen3OmniMoeVisionEncoder``), strip the leading
+             ``"<spec.name>."`` from each rewritten key and forward the
+             slice. The submodule handles its own fused-shard dispatch.
+           - Otherwise, apply ``stacked_params_mapping`` from the spec
+             before doing a direct param lookup. This is how
+             ``audio_tower.layers.X.self_attn.q_proj.weight`` reaches
+             ``audio_tower.layers.X.self_attn.qkv_proj.weight`` with
+             ``shard_id="q"``. Without it the audio attention layers
+             are loaded with random init weights and produce NaN in
+             forward.
+        """
+        # 1. Bucket by spec.
+        buckets: dict[str, list[tuple[str, torch.Tensor]]] = {
+            n: [] for n in self._specs
+        }
+        skipped = 0
+        for name, loaded_weight in weights:
+            spec = self._spec_for(name)
+            if spec is None:
+                skipped += 1
+                continue
+            rewritten = name
+            for old, new in spec.checkpoint_rewrites:
+                rewritten = rewritten.replace(old, new)
+            buckets[spec.name].append((rewritten, loaded_weight))
+
+        # 2. Per-spec dispatch.
+        loaded_total = 0
+        for spec_name, bucket in buckets.items():
+            if not bucket:
+                continue
+            spec = self._specs[spec_name]
+            submodule = getattr(self, spec_name)
+            if hasattr(submodule, "load_weights"):
+                # Delegate. The submodule expects names relative to itself
+                # (without the leading "{spec.name}.").
+                relative = []
+                inner_prefix = spec.name + "."
+                for n, w in bucket:
+                    if n.startswith(inner_prefix):
+                        relative.append((n[len(inner_prefix):], w))
+                    else:
+                        # If rewrites didn't produce the expected prefix,
+                        # forward as-is and let the submodule's own
+                        # error reporting fire.
+                        relative.append((n, w))
+                submodule.load_weights(relative)
+                loaded_total += len(relative)
+            else:
+                loaded_total += self._load_with_stacked_mapping(spec, bucket)
+
+        logger.info(
+            "EncoderModuleContainer.load_weights: loaded=%d skipped=%d",
+            loaded_total, skipped,
+        )
+
+    def _load_with_stacked_mapping(
+        self,
+        spec: "EncoderModuleSpec",
+        weights: list[tuple[str, torch.Tensor]],
+    ) -> int:
+        """Apply spec.stacked_params_mapping then fall back to direct lookup."""
+        params = dict(self.named_parameters())
+        loaded = 0
+        for name, loaded_weight in weights:
+            dispatched = False
+            for target, source, shard_id in spec.stacked_params_mapping:
+                if source not in name:
+                    continue
+                mapped = name.replace(source, target)
+                if mapped not in params:
+                    continue
+                param = params[mapped]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight, shard_id)
+                dispatched = True
+                loaded += 1
+                break
+            if dispatched:
+                continue
+            if name in params:
+                param = params[name]
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
+                weight_loader(param, loaded_weight)
+                loaded += 1
+        return loaded
+
+    def _spec_for(self, name: str) -> "EncoderModuleSpec | None":
+        for spec in self._specs.values():
+            if name.startswith(spec.checkpoint_prefixes):
+                return spec
+        return None
+
+
 class SGLangEncoderWorker:
-    """SGLang-native encoder model wrapper.
+    """SGLang-native encoder model wrapper with partial loading.
 
     The worker process is invoked by ``MultiProcessPipelineRunner``,
     which has remapped ``CUDA_VISIBLE_DEVICES`` to a single physical GPU
@@ -78,6 +267,9 @@ class SGLangEncoderWorker:
         nccl_port: Loopback NCCL bootstrap port allocated by the runner.
             Optional; the worker picks a free port when unset
             (single-rank case).
+        encoder_specs: Adapter-supplied list of encoder submodules to
+            load. Required — the worker does NOT load the full
+            ``ForConditionalGeneration`` class.
         dtype: Optional dtype override forwarded to ``ServerArgs``.
         load_format: Optional load-format override forwarded to ``ServerArgs``.
         server_args_overrides: Extra ``ServerArgs`` kwargs (loader / processor
@@ -92,6 +284,7 @@ class SGLangEncoderWorker:
         tp_rank: int,
         tp_size: int,
         nccl_port: int | None,
+        encoder_specs: Sequence["EncoderModuleSpec"],
         dtype: str | None = None,
         load_format: str | None = None,
         server_args_overrides: dict[str, Any] | None = None,
@@ -101,6 +294,13 @@ class SGLangEncoderWorker:
         if not (0 <= tp_rank < tp_size):
             raise ValueError(
                 f"tp_rank={tp_rank} must satisfy 0 <= tp_rank < tp_size={tp_size}"
+            )
+        if not encoder_specs:
+            raise ValueError(
+                "SGLangEncoderWorker requires encoder_specs; the adapter must "
+                "declare its upstream submodules. The worker no longer falls "
+                "back to get_model() on the full ForConditionalGeneration "
+                "class — that would load the LLM/talker on every encoder GPU."
             )
 
         self.tp_rank = int(tp_rank)
@@ -178,17 +378,81 @@ class SGLangEncoderWorker:
         initialize_dp_attention(server_args, self.model_config)
         self.tp_group = get_tp_group()
 
-        self.model = get_model(
-            model_config=self.model_config,
-            load_config=self.load_config,
-            device_config=DeviceConfig(device="cuda", gpu_id=cuda_device),
-        )
+        self._device_config = DeviceConfig(device="cuda", gpu_id=cuda_device)
+
+        # ---- Partial-load path ----------------------------------------
+        # Build only the encoder submodules the adapter declared, then
+        # iterate the upstream loader's weight stream and let the
+        # container drop everything that doesn't match a declared
+        # prefix.
+        self.model = self._build_and_load_encoder(encoder_specs)
+        self.model.eval()
+
         logger.info(
             "SGLangEncoderWorker ready (tp_rank=%d/%d, physical_gpu=%d, "
-            "model=%s, dist_addr=%s)",
+            "model=%s, submodules=%s, dist_addr=%s)",
             self.tp_rank, self.tp_size, self.physical_gpu_id,
-            model_path, dist_addr,
+            model_path, [s.name for s in encoder_specs], dist_addr,
         )
+
+    # ------------------------------------------------------------------
+    # Partial-load helper
+    # ------------------------------------------------------------------
+
+    def _build_and_load_encoder(
+        self,
+        encoder_specs: Sequence["EncoderModuleSpec"],
+    ) -> EncoderModuleContainer:
+        """Construct the container + run upstream loader's weight stream.
+
+        We build the container under ``set_default_torch_dtype`` and on
+        the target device so SGLang's TP-aware layers register their
+        ``param.weight_loader`` hooks correctly during ``__init__``.
+        Then we hand the container off to ``DefaultModelLoader``'s
+        weight-postprocess machinery, which iterates the safetensors
+        shards and calls ``container.load_weights(...)`` once.
+        """
+        from sglang.srt.model_loader.utils import set_default_torch_dtype
+
+        loader = get_model_loader(self.load_config)
+        # We deliberately do not use ``loader.load_model`` because that
+        # path always calls ``_initialize_model`` on the full upstream
+        # entry class. The upstream API does not expose a
+        # partial-encoder-loader yet (see RFC Open Question 1).
+        target_device = torch.device(self._device_config.device)
+
+        quant_config = _resolve_quant_config(self.model_config, self.load_config)
+
+        with set_default_torch_dtype(self.model_config.dtype):
+            with target_device:
+                container = EncoderModuleContainer(
+                    self.model_config.hf_config,
+                    encoder_specs=encoder_specs,
+                    quant_config=quant_config,
+                )
+
+            if isinstance(loader, DefaultModelLoader):
+                weights = loader._get_all_weights(self.model_config, container)
+            else:
+                # Other loaders (BitsAndBytes, ShardedState, ...) don't
+                # expose the same iterator. Phase 0 only validates the
+                # default loader; non-default load formats raise here so
+                # users see a clear error rather than a broken weight
+                # set.
+                raise NotImplementedError(
+                    f"Encoder partial-load currently requires "
+                    f"DefaultModelLoader; got {type(loader).__name__}. "
+                    f"Use load_format='auto' (the default) for Phase 0."
+                )
+
+            DefaultModelLoader.load_weights_and_postprocess(
+                container, weights, target_device,
+            )
+        return container
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def encode_batch(self, plan: "BatchPlan") -> dict[str, torch.Tensor | None]:

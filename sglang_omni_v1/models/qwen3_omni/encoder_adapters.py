@@ -9,10 +9,13 @@ For each encoder stage there is one adapter implementing
   ``_skip``) contribute no upstream items; active requests yield one or
   more :class:`MultimodalDataItem` per request, with per-request
   bookkeeping captured in :class:`RequestSpan`.
-- ``run_feature`` calls the upstream encoder methods
-  (``thinker.get_image_feature``, ``...get_video_feature``,
-  ``...get_audio_feature``). Empty plans short-circuit and never call
-  the model.
+- ``run_feature`` calls the loaded upstream encoder submodule directly
+  — ``Qwen3OmniMoeVisionEncoder`` for image/video, ``Qwen3OmniMoeAudioEncoder``
+  for audio — instead of the full ``thinker.get_*_feature`` entry
+  points. The encoder worker partial-loads ONLY these submodules (see
+  ``EncoderModuleSpec``), so ``model.thinker`` is never instantiated and
+  the full Qwen3-Omni LLM weights never reach the encoder GPU.
+  Empty plans short-circuit and never call any submodule.
 - ``slice_results`` un-batches the upstream output back to per-request
   ``encoder_outs`` dicts using the captured spans.
 
@@ -26,13 +29,18 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
-from sglang.srt.models.qwen3_omni_moe import _get_feat_extract_output_lengths
+from sglang.srt.models.qwen3_omni_moe import (
+    Qwen3OmniMoeAudioEncoder,
+    Qwen3OmniMoeVisionEncoder,
+    _get_feat_extract_output_lengths,
+)
 
 from sglang_omni_v1.models.qwen3_omni.payload_types import PipelineState
 from sglang_omni_v1.models.qwen3_omni.request_builders import (
@@ -54,6 +62,119 @@ AUDIO_STAGE = "audio_encoder"
 # here to avoid pulling that module's heavyweight import chain (preprocessor,
 # transformers video utils) into the lean adapter module.
 QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER = 5
+
+
+# ---------------------------------------------------------------------------
+# EncoderModuleSpec — declares which upstream encoder submodules a stage
+# loads and which checkpoint prefixes feed them. The shared SGLang encoder
+# worker uses these specs to partial-load only the relevant submodule
+# weights, avoiding the ~57 GB of LLM/talker weights that
+# ``Qwen3OmniMoeForConditionalGeneration`` would otherwise pull in.
+# See ``docs/developer_reference/encoder_tp_path_b_design.md`` →
+# "Upstream Reuse Boundary" + "EncoderModuleSpec".
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class EncoderModuleSpec:
+    """Declaration of an upstream encoder submodule the worker should load.
+
+    Args:
+        name: Local attribute name the submodule will be exposed as on
+            ``EncoderModuleContainer`` (e.g. ``"visual"``,
+            ``"audio_tower"``). Adapters reference this name when they
+            access the submodule from ``model.<name>`` in
+            ``run_feature``.
+        build_module: Callable receiving the HF config and a
+            ``QuantizationConfig | None`` and returning the concrete
+            ``nn.Module`` instance.
+        checkpoint_prefixes: Tuple of checkpoint key prefixes to accept
+            for this submodule. Any (name, tensor) pair in the
+            checkpoint stream whose name does NOT start with one of
+            these prefixes is dropped without allocation.
+        checkpoint_rewrites: Tuple of ``(old, new)`` pairs applied
+            sequentially via ``str.replace`` to map upstream checkpoint
+            keys onto the local submodule's parameter namespace. Order
+            matters; rewrites are applied left-to-right on each match.
+        stacked_params_mapping: ``(target_substring, source_substring,
+            shard_id)`` tuples describing fused-shard params (e.g.
+            ``q_proj`` + ``k_proj`` + ``v_proj`` → ``qkv_proj``). When
+            an incoming key contains ``source_substring``, the container
+            replaces it with ``target_substring`` and dispatches to
+            ``param.weight_loader(param, weight, shard_id)``. Only used
+            when the submodule does not provide its own ``load_weights``;
+            if the submodule has ``load_weights``, the container delegates
+            to it and this field is ignored.
+    """
+
+    name: str
+    build_module: Callable[[Any, Any], nn.Module]
+    checkpoint_prefixes: tuple[str, ...]
+    checkpoint_rewrites: tuple[tuple[str, str], ...] = ()
+    stacked_params_mapping: tuple[tuple[str, str, str], ...] = ()
+
+
+def _build_qwen3_omni_visual(hf_config: Any, quant_config: Any) -> nn.Module:
+    """Build ``Qwen3OmniMoeVisionEncoder`` from a thinker-aware HF config."""
+    thinker = getattr(hf_config, "thinker_config", hf_config)
+    return Qwen3OmniMoeVisionEncoder(
+        thinker.vision_config,
+        quant_config=quant_config,
+        norm_eps=getattr(thinker, "rms_norm_eps", 1e-6),
+        prefix="visual",
+    )
+
+
+def _build_qwen3_omni_audio(hf_config: Any, quant_config: Any) -> nn.Module:
+    """Build ``Qwen3OmniMoeAudioEncoder``."""
+    del quant_config  # the upstream audio encoder constructor does not take one
+    thinker = getattr(hf_config, "thinker_config", hf_config)
+    return Qwen3OmniMoeAudioEncoder(thinker.audio_config)
+
+
+QWEN3_OMNI_VISUAL_SPEC = EncoderModuleSpec(
+    name="visual",
+    build_module=_build_qwen3_omni_visual,
+    # Upstream Qwen3-Omni checkpoints place visual weights under either
+    # ``model.visual.*`` or ``thinker.visual.*`` depending on the dump
+    # source; some older shards keep them at the top-level ``visual.*``.
+    checkpoint_prefixes=("model.visual.", "thinker.visual.", "visual."),
+    checkpoint_rewrites=(
+        ("model.visual.", "visual."),
+        ("thinker.visual.", "visual."),
+        # Upstream key names use ``attn.qkv``/``attn.out_proj``; the
+        # SGLang submodule renames these to ``attn.qkv_proj``/``attn.proj``
+        # after fusing QKV. Apply rewrites so the loader's
+        # ``param.weight_loader`` sees the right destination param name.
+        ("attn.qkv.", "attn.qkv_proj."),
+        ("attn.out_proj.", "attn.proj."),
+    ),
+)
+
+QWEN3_OMNI_AUDIO_SPEC = EncoderModuleSpec(
+    name="audio_tower",
+    build_module=_build_qwen3_omni_audio,
+    checkpoint_prefixes=("audio_tower.", "thinker.audio_tower."),
+    checkpoint_rewrites=(
+        ("thinker.audio_tower.", "audio_tower."),
+        # Upstream rename: checkpoint stores ``self_attn.out_proj`` but the
+        # SGLang module exposes ``self_attn.proj``. Mirrors the rename in
+        # ``Qwen3OmniMoeForConditionalGeneration.load_weights`` so the
+        # output projection actually loads.
+        (".self_attn.out_proj", ".self_attn.proj"),
+    ),
+    stacked_params_mapping=(
+        # Audio tower's ``VisionAttention`` fuses Q/K/V into one
+        # ``QKVParallelLinear`` named ``qkv_proj``. The checkpoint stores
+        # ``q_proj``/``k_proj``/``v_proj`` separately; container's loader
+        # rewrites the source name onto the fused param and dispatches
+        # via ``weight_loader(param, weight, shard_id)``. Without this
+        # we silently drop ~half the audio attention weights.
+        (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+        (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+        (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +354,12 @@ class Qwen3OmniImageEncoderAdapter:
     """Adapter for the visual stage (images and videos)."""
 
     stage_name = IMAGE_STAGE
+    # Declares the upstream submodules the encoder worker must
+    # partial-load. The factory passes this through to
+    # ``SGLangEncoderWorker`` so only ``Qwen3OmniMoeVisionEncoder``
+    # weights end up on the encoder GPU — the LLM, talker, and audio
+    # tower are never instantiated.
+    encoder_specs: tuple[EncoderModuleSpec, ...] = (QWEN3_OMNI_VISUAL_SPEC,)
 
     def __init__(
         self,
@@ -346,27 +473,49 @@ class Qwen3OmniImageEncoderAdapter:
     ) -> dict[str, torch.Tensor | None]:
         if plan.is_empty:
             return {"image": None, "video": None, "audio": None}
-        thinker = getattr(model, "thinker", model)
-        # get_video_feature() upstream needs the same MultimodalDataItem
-        # contract that get_image_feature does: items[i].image_grid_thw
-        # is read by the parent helper. Upstream Qwen3-VL uses the same
-        # method name for video-grid tensors but it dispatches by
-        # modality internally — we set image_grid_thw on video items too
-        # so the wrapped concat works (qwen3_vl.py:1212).
-        for vid in plan.video_items:
-            if not hasattr(vid, "image_grid_thw") and hasattr(vid, "video_grid_thw"):
-                vid.image_grid_thw = vid.video_grid_thw
+        # ``model`` is the EncoderModuleContainer the worker built from
+        # ``self.encoder_specs``; it exposes the visual submodule under the
+        # name declared in QWEN3_OMNI_VISUAL_SPEC (``visual``). We mirror
+        # the simple no-chunking path of upstream
+        # ``Qwen3OmniMoeThinkerForConditionalGeneration.get_{image,video}_feature``
+        # without going through ``model.thinker`` (which doesn't exist —
+        # the container only holds the encoder submodules).
+        visual = model.visual
         image_embed = (
-            thinker.get_image_feature(plan.image_items)
+            self._get_visual_feature(visual, plan.image_items, kind="image")
             if plan.image_items
             else None
         )
         video_embed = (
-            thinker.get_video_feature(plan.video_items)
+            self._get_visual_feature(visual, plan.video_items, kind="video")
             if plan.video_items
             else None
         )
         return {"image": image_embed, "video": video_embed, "audio": None}
+
+    @staticmethod
+    def _get_visual_feature(
+        visual: nn.Module,
+        items: list[MultimodalDataItem],
+        *,
+        kind: str,
+    ) -> torch.Tensor:
+        """Mirror of ``thinker.get_{image,video}_feature`` simple path.
+
+        Concats per-item pixel/grid tensors and calls the loaded
+        submodule directly. Upstream's chunking branch (gated on
+        ``SGLANG_VLM_MAX_PATCHES_PER_VIT`` / ``SGLANG_VLM_MAX_IMAGES_PER_VIT``)
+        is not mirrored in Phase 0 — long-video deployments that need it
+        will be added as a follow-up.
+        """
+        pixel_values = (
+            torch.cat([item.feature for item in items], dim=0).type(visual.dtype)
+        )
+        grid_attr = "image_grid_thw" if kind == "image" else "video_grid_thw"
+        grid = torch.cat([getattr(item, grid_attr) for item in items], dim=0)
+        assert pixel_values.dim() == 2, pixel_values.dim()
+        assert grid.dim() == 2, grid.dim()
+        return visual(pixel_values, grid_thw=grid)
 
     def slice_results(
         self,
@@ -459,6 +608,7 @@ class Qwen3OmniAudioEncoderAdapter:
     """Adapter for the audio stage."""
 
     stage_name = AUDIO_STAGE
+    encoder_specs: tuple[EncoderModuleSpec, ...] = (QWEN3_OMNI_AUDIO_SPEC,)
 
     def __init__(self, *, hf_config: Any, dtype: torch.dtype) -> None:
         del hf_config, dtype  # not currently consumed
@@ -524,9 +674,34 @@ class Qwen3OmniAudioEncoderAdapter:
     ) -> dict[str, torch.Tensor | None]:
         if plan.is_empty:
             return {"image": None, "video": None, "audio": None}
-        thinker = getattr(model, "thinker", model)
-        embed = thinker.get_audio_feature(plan.audio_items)
+        # ``model`` is the EncoderModuleContainer; ``audio_tower`` is the
+        # name declared in QWEN3_OMNI_AUDIO_SPEC.
+        embed = self._get_audio_feature(model.audio_tower, plan.audio_items)
         return {"image": None, "video": None, "audio": embed}
+
+    @staticmethod
+    def _get_audio_feature(
+        audio_tower: nn.Module,
+        items: list[MultimodalDataItem],
+    ) -> torch.Tensor:
+        """Mirror of ``thinker.get_audio_feature`` against the loaded submodule."""
+        feature_attention_mask = (
+            torch.cat([item.feature_attention_mask for item in items], dim=0)
+            .type(torch.long)
+        )
+        input_features = (
+            torch.cat([item.feature for item in items])
+            .type(audio_tower.dtype)
+            .to(next(audio_tower.parameters()).device)
+        )
+        audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+        # Drop padded positions before the conv stack — same as upstream.
+        input_features = (
+            input_features.permute(0, 2, 1)[feature_attention_mask.bool()]
+            .permute(1, 0)
+        )
+        outputs = audio_tower(input_features, feature_lens=audio_feature_lengths)
+        return outputs.last_hidden_state
 
     def slice_results(
         self,

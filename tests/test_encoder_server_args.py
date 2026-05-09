@@ -175,6 +175,18 @@ def test_helper_rejects_encoder_fork_keys(key, value):
 # ---------------------------------------------------------------------------
 
 
+def _stub_specs():
+    """Minimal valid spec list for worker validation tests."""
+    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import EncoderModuleSpec
+    return (
+        EncoderModuleSpec(
+            name="dummy",
+            build_module=lambda hf, qc: None,
+            checkpoint_prefixes=("dummy.",),
+        ),
+    )
+
+
 def test_worker_rejects_worker_managed_keys_in_overrides_dict():
     """SGLangEncoderWorker rejects worker-managed keys *before* the
     helper-level **splat, otherwise Python raises a confusing
@@ -182,14 +194,8 @@ def test_worker_rejects_worker_managed_keys_in_overrides_dict():
     instantiating the worker (which would require a real model)."""
     from sglang_omni_v1.model_runner import sglang_encoder_worker as sew
 
-    # The reject runs before any heavy initialization, so we can hit it
-    # directly by calling __init__ with a stub server_args path that
-    # raises before init_distributed_environment.
     cls = sew.SGLangEncoderWorker
-    # Build a dummy instance bypassing __init__ to hit the validation.
     inst = cls.__new__(cls)
-    # Re-run only the early validation by calling __init__ partially
-    # via a minimal stub: pass overrides with a worker-managed key.
     with pytest.raises(ValueError, match="worker-managed keys"):
         cls.__init__(
             inst,
@@ -198,6 +204,7 @@ def test_worker_rejects_worker_managed_keys_in_overrides_dict():
             tp_rank=0,
             tp_size=1,
             nccl_port=None,
+            encoder_specs=_stub_specs(),
             server_args_overrides={"tp_size": 99},
         )
 
@@ -214,6 +221,7 @@ def test_worker_rejects_invalid_tp_rank():
             tp_rank=2,
             tp_size=2,  # tp_rank must be < tp_size, so 2 is invalid
             nccl_port=None,
+            encoder_specs=_stub_specs(),
         )
 
 
@@ -229,4 +237,26 @@ def test_worker_rejects_invalid_tp_size():
             tp_rank=0,
             tp_size=0,
             nccl_port=None,
+            encoder_specs=_stub_specs(),
+        )
+
+
+def test_worker_rejects_empty_encoder_specs():
+    """Locks the [Upstream Reuse Boundary] contract: the worker MUST
+    refuse to fall back to ``get_model()`` on the full
+    ``ForConditionalGeneration`` class. An adapter without any
+    ``encoder_specs`` is a misconfigured stage, not a "load
+    everything" hint."""
+    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+
+    inst = SGLangEncoderWorker.__new__(SGLangEncoderWorker)
+    with pytest.raises(ValueError, match="encoder_specs"):
+        SGLangEncoderWorker.__init__(
+            inst,
+            model_path="dummy/model",
+            gpu_id=0,
+            tp_rank=0,
+            tp_size=1,
+            nccl_port=None,
+            encoder_specs=(),
         )
