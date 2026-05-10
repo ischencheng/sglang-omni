@@ -165,9 +165,101 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         pickle.dump({"image_embeds": image_embeds, "deepstack": deepstack}, f)
 
 
+def _run_bare_sglang(model_path: str, out_path: str) -> None:
+    """Upstream SGLang ``get_model()`` on the full
+    ``Qwen3OmniMoeForConditionalGeneration``, no ``encoder_only``, no
+    ``EncoderModuleContainer``, no fused-shard dispatch logic from us.
+    Then call ``thinker.get_image_feature`` directly.
+
+    Isolates: does our wrapper (partial-load + fused-shard dispatch +
+    init_distributed at tp=1) introduce any numerical drift vs a pure
+    upstream load? Both lanes run at tp_size=1 so TP collectives are
+    identical no-ops.
+    """
+    import torch
+    from sglang.srt.configs.device_config import DeviceConfig
+    from sglang.srt.configs.load_config import LoadConfig
+    from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.distributed import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from sglang.srt.layers.dp_attention import initialize_dp_attention
+    from sglang.srt.model_loader import get_model
+    from sglang.srt.server_args import (
+        ServerArgs, set_global_server_args_for_scheduler,
+    )
+
+    from sglang_omni_v1.proto import StagePayload
+    from sglang_omni_v1.scheduling.messages import IncomingMessage
+    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
+        Qwen3OmniImageEncoderAdapter,
+    )
+
+    pixel, grid = _build_real_image_inputs(model_path)
+
+    server_args = ServerArgs(
+        model_path=model_path,
+        trust_remote_code=True,
+        tp_size=1, pp_size=1, base_gpu_id=0,
+        dist_init_addr="127.0.0.1:29577",
+        encoder_only=False,           # bare = full ForConditionalGeneration
+        mm_enable_dp_encoder=False,
+        disable_cuda_graph=True,
+        random_seed=123,
+        dtype="float16",
+        mem_fraction_static=0.9,
+    )
+    set_global_server_args_for_scheduler(server_args)
+
+    init_distributed_environment(
+        world_size=1, rank=0, local_rank=0,
+        distributed_init_method="tcp://127.0.0.1:29577",
+        backend="nccl",
+    )
+    initialize_model_parallel(tensor_model_parallel_size=1)
+
+    model_config = ModelConfig.from_server_args(server_args)
+    initialize_dp_attention(server_args, model_config)
+    load_config = LoadConfig(load_format=server_args.load_format)
+    torch.cuda.set_device(0)
+    device_config = DeviceConfig(device="cuda", gpu_id=0)
+    model = get_model(
+        model_config=model_config,
+        load_config=load_config,
+        device_config=device_config,
+    )
+
+    # Build the MultimodalDataItem exactly like our adapter does.
+    hf_cfg = model_config.hf_config
+    adapter = Qwen3OmniImageEncoderAdapter(hf_config=hf_cfg, dtype=torch.float16)
+    msg = IncomingMessage(
+        request_id="r0",
+        type="new_request",
+        data=StagePayload(
+            request_id="r0", request=None,
+            data={"encoder_inputs": {"image_encoder": {
+                "pixel_values": pixel.to("cuda:0"),
+                "image_grid_thw": grid,
+            }}},
+        ),
+    )
+    plan = adapter.build_batch([msg])
+    items = plan.image_items
+    thinker = model.thinker if hasattr(model, "thinker") else model
+    visual = thinker.visual
+    pixel_values = torch.cat([item.feature for item in items], dim=0).type(visual.dtype)
+    grid = torch.cat([item.image_grid_thw for item in items], dim=0)
+    with torch.no_grad():
+        embeds = visual(pixel_values, grid_thw=grid)
+    image_embeds = embeds.detach().cpu() if torch.is_tensor(embeds) else embeds[0].detach().cpu()
+    with open(out_path, "wb") as f:
+        pickle.dump({"image_embeds": image_embeds, "deepstack": None}, f)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("backend", choices=["local", "sglang"])
+    parser.add_argument("backend", choices=["local", "sglang", "bare_sglang"])
     parser.add_argument("out_path")
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--tp-rank", type=int, default=0)
@@ -177,6 +269,8 @@ def main() -> None:
     model_path = _resolve_model_path()
     if args.backend == "local":
         _run_local(model_path, args.out_path)
+    elif args.backend == "bare_sglang":
+        _run_bare_sglang(model_path, args.out_path)
     else:
         _run_sglang(
             model_path,

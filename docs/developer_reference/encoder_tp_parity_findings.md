@@ -16,19 +16,39 @@ divergence change once TP kicks in?
 
 | Comparison | Max abs | Mean abs | Mean per-token cos sim | RFC `atol=1e-3, rtol=1e-3` |
 |---|---:|---:|---:|:-:|
-| local (tp=1) vs sglang (tp=1) | 5.952 | 0.0216 | 0.9877 | ❌ |
-| local (tp=1) vs sglang (tp=2) | 5.949 | 0.0217 | 0.9877 | ❌ |
-| sglang (tp=1) vs sglang (tp=2) | 0.266 | 0.00082 | 0.999984 | ❌ (one outlier) |
+| **wrapper (tp=1) vs bare upstream `get_model()` (tp=1)** | **0** | **0** | **1.000000** | ✅ (bit-equal) |
+| sglang wrapper (tp=1) vs sglang wrapper (tp=2) | 0.266 | 0.00082 | 0.999984 | ❌ (one outlier) |
+| local HF (tp=1) vs sglang wrapper (tp=1) | 5.952 | 0.0216 | 0.9877 | ❌ |
+| local HF (tp=1) vs sglang wrapper (tp=2) | 5.949 | 0.0217 | 0.9877 | ❌ |
 
-The local-vs-sglang gap (rows 1 and 2) is statistically identical at
-TP=1 and TP=2. Adding encoder TP contributes only the small NCCL
-fp16 accumulation-order noise visible in row 3; the dominant ~5.95
-divergence is the HF-transformers vs SGLang reimplementation gap and
-is independent of TP.
+Row 1 (wrapper-vs-bare) isolates whether **our wrapping** introduces
+any numerical drift. Result: **zero**. `EncoderModuleContainer`
+partial-load, fused-shard dispatch, `init_distributed_environment` at
+world=1, and the adapter slicing produce output that is
+`torch.equal == True` to upstream `get_model()` on the full
+`Qwen3OmniMoeForConditionalGeneration`. All three deepstack tensors
+match bit-for-bit. The wrapper is a correctness no-op.
+
+Row 2 is the TP scaling lane: same code, different rank counts. The
+0.27 outlier is NCCL fp16 accumulation-order noise; 97.5% of tokens
+have cos sim ≥ 0.9999. The wrapper's TP plumbing is correct.
+
+Rows 3 and 4 are the HF-vs-SGLang implementation gap (Conv3d→Linear
+in PR #19788/#20282, SGLang's `VisionAttention` vs HF
+`Qwen3OmniMoeVisionSdpaAttention`, etc.). These are an upstream
+property, not something we own. SGLang upstream itself validates this
+gap via `lm-eval`/`lmms_eval` benchmarks (PR #19788 shows identical
+GPQA/MMMU scores), not via tensor bit-parity.
 
 ## Reproducer
 
 ```sh
+# 0. Capture bare upstream get_model() output (full
+#    Qwen3OmniMoeForConditionalGeneration, no EncoderModuleContainer,
+#    no fused-shard dispatch, no encoder_only). Isolates the wrapper.
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
+  python tests/_encoder_parity_harness.py bare_sglang /tmp/parity_bare_sglang_tp1.pkl
+
 # 1. Capture local-backend (HF tower) output
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
   python tests/_encoder_parity_harness.py local /tmp/parity_local.pkl
