@@ -11,6 +11,10 @@ stack and the upstream SGLang Qwen3-Omni / Qwen3-VL / encode_server paths,
 plus a review pass that fixed three earlier mistakes in the non-entry-rank data
 path, single-rank distributed init, and the adapter batch interface.
 
+This is the detailed design note. For the shorter review-facing RFC that keeps
+only the decisions and contracts, see
+[`encoder_tp_path_b_design_lean.md`](encoder_tp_path_b_design_lean.md).
+
 ## Motivation
 
 This RFC is solving the long-sequence **activation-memory** OOM problem, not
@@ -446,7 +450,7 @@ def _recv_messages(
         # both ranks before the device broadcast fires.
         ok_flags = self._allocation_ready_gather(local_ok=True)
         if not all(ok_flags):
-            return local, RuntimeError("peer-rank tensor allocation failed")
+            return local, RuntimeError("non-entry-rank tensor allocation failed")
 
         for tensor_list in tensor_lists:
             for t in tensor_list:
@@ -491,12 +495,12 @@ def _recv_messages(
 
     ok_flags = self._allocation_ready_gather(local_ok=alloc_err is None)
     if not all(ok_flags):
-        # Either local OOM or peer OOM — either way no rank issues
+        # Either local OOM or non-entry-rank OOM — either way no rank issues
         # the device broadcast, so neither side blocks. Surface the
-        # local error if we have one, otherwise a peer-failure stub.
+        # local error if we have one, otherwise a non-entry-rank failure stub.
         return [], (
             alloc_err if alloc_err is not None
-            else RuntimeError("peer-rank tensor allocation failed")
+            else RuntimeError("non-entry-rank tensor allocation failed")
         )
 
     rebuilt: list[IncomingMessage] = []
@@ -721,7 +725,7 @@ def start(self) -> None:
                 self._emit_error(
                     messages,
                     build_err if build_err is not None
-                    else RuntimeError("peer-rank encoder build_batch failed"),
+                    else RuntimeError("non-entry-rank encoder build_batch failed"),
                 )
             continue
 
@@ -2358,15 +2362,15 @@ Rules:
     drained this iteration, which `Stage._drain_outbox_external`
     converts into a Coordinator failure → HTTP 500.
   - Fatal forward: `encode_batch` is inside upstream SGLang TP
-    collectives. A rank-local OOM / CUDA / NCCL exception can leave peer
-    ranks blocked in NCCL, so a CPU `all_gather_object` after the
+    collectives. A rank-local OOM / CUDA / NCCL exception can leave
+    non-entry ranks blocked in NCCL, so a CPU `all_gather_object` after the
     exception is not safe. The rank that catches the exception must exit
     non-zero immediately. `MultiProcessPipelineRunner._monitor_children`
     observes `StageGroup.any_dead()` and tears down the whole TP group.
   - Recoverable post-forward: `slice_results` runs only on the entry rank
     after `encode_batch` returned on all ranks. It can emit
-    per-request errors locally and continue; no TP peer is waiting on a
-    matching collective at that point.
+    per-request errors locally and continue; no non-entry rank is waiting
+    on a matching collective at that point.
 - **Pre-broadcast entry-rank failures**: `_recv_messages` does H2D
   copies inside `_strip_and_lift` *before* the metadata broadcast. A
   failure there (OOM, dtype coercion, malformed payload) on the
@@ -2625,7 +2629,7 @@ Phase 0 — landing path that doesn't break v1:
      collective. Assert the failing rank calls `_fatal_tp_forward_error`
      / exits non-zero instead of entering the CPU pre-forward gather,
      `StageGroup.any_dead()` becomes true, `MultiProcessPipelineRunner`
-     terminates the peer process, and all active Coordinator futures /
+     terminates the remaining TP process, and all active Coordinator futures /
      stream queues are failed with a non-empty stage-group fatal error.
      This test must explicitly reject "scheduler keeps running and emits
      request-level errors" for forward-time TP faults.

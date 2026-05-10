@@ -40,4 +40,5 @@ Our core features include:
 
    developer_reference/architecture.md
    developer_reference/relay_design.md
+   developer_reference/encoder_tp_path_b_design_lean.md
    developer_reference/encoder_tp_path_b_design.md
