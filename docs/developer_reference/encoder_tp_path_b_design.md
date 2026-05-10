@@ -8,8 +8,26 @@ encoder copies under `models/<name>/components/`.
 This RFC follows from #375 and the post-refactor architecture in #188. It
 is the result of a code walk over the v1 stage / scheduler / mp_runner
 stack and the upstream SGLang Qwen3-Omni / Qwen3-VL / encode_server paths,
-plus a review pass that fixed three earlier mistakes in the follower data
+plus a review pass that fixed three earlier mistakes in the non-entry-rank data
 path, single-rank distributed init, and the adapter batch interface.
+
+## Motivation
+
+This RFC is solving the long-sequence **activation-memory** OOM problem, not
+a model-weight residency problem. Qwen3-Omni's vision + audio encoder weights
+are small compared with the thinker, roughly 2.5 GB combined, but activation
+memory scales with input length. A one-minute video can push encoder
+activations above 30 GB on a single GPU; today that pressure is exactly what
+pushes the colocated thinker toward OOM and forced workaround-style memory
+reservation such as `--encoder-mem-reserve` in #339. The concrete pain shows
+up in the long-video paths discussed around #327 / #339.
+
+Plan B uses SGLang-native tensor parallelism because TP shards the encoder
+activations across ranks. That is the real win: giving the encoder a bigger
+GPU only moves the cliff, and DP would replicate the same long-sequence
+activation footprint on every rank. We still keep the weight-loading scope
+tight so encoder stages do not duplicate full thinker/talker weights, but the
+primary scaling target is activation memory.
 
 ## Architecture
 
@@ -22,7 +40,7 @@ HTTP API -> Client -> Coordinator -> StageGroup -> Stage(leader)
                                                 v
                                   EncoderScheduler (one per rank)
                                                 v
-                                  SGLangEncoderWorker (one per rank)
+                                  SGLangEncoderRunner (one per rank)
                                                 v
                               upstream SGLang encoder submodule(s)
                                   Qwen3OmniMoeVisionEncoder
@@ -39,7 +57,7 @@ Only the implementation behind encoder stages changes:
 
 ```text
 old:  Stage -> SimpleScheduler -> Qwen3OmniImageEncoder (HF copy)
-new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream encoder submodule
+new:  Stage -> EncoderScheduler -> SGLangEncoderRunner -> upstream encoder submodule
 ```
 
 ### Layer Responsibilities
@@ -50,8 +68,8 @@ new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream encoder submo
 | `MultiProcessPipelineRunner` / `StageGroup` | Spawn one OS process per TP rank, allocate NCCL port, inject `tp_rank/tp_size/gpu_id/nccl_port` | None — already TP-capable |
 | `Stage` (`single/leader/follower`) | Control plane, relay IO, input aggregation, stream routing, scheduler in/out queues, leader-only outbound traffic | None |
 | `TPLeaderFanout` / `TPFollowerControlPlane` | Mirror leader-side `Shutdown/Profiler/Abort` to followers via mp.Queue | None |
-| **`EncoderScheduler`** | TP-aware non-AR scheduling loop: drain inbox on entry rank, broadcast **metadata** to followers via TP CPU group, broadcast **tensor data** to followers via TP device group, run worker on every rank, emit downstream traffic only on entry rank | **New** |
-| **`SGLangEncoderWorker`** | Initialize SGLang distributed state (always — even at `tp_size=1`), build encoder-only `ModelConfig`, instantiate only the upstream encoder submodules declared by the adapter, partial-load matching checkpoint prefixes, expose `encode_batch()` | **New** |
+| **`EncoderScheduler`** | TP-aware non-AR scheduling loop: drain inbox on `entry_rank`, broadcast **metadata** to `non_entry_rank`s via TP CPU group, broadcast **tensor data** to `non_entry_rank`s via TP device group, run runner on every rank, emit downstream traffic only on `entry_rank` | **New** |
+| **`SGLangEncoderRunner`** | Initialize SGLang distributed state (always — even at `tp_size=1`), build encoder-only `ModelConfig`, instantiate only the upstream encoder submodules declared by the adapter, partial-load matching checkpoint prefixes, expose `encode_batch()` | **New** |
 | **`Qwen3OmniEncoderAdapter`** | v1 `PipelineState.encoder_inputs` <-> upstream `MultimodalDataItem` <-> v1 `encoder_outs`, with explicit `BatchPlan` and `EncoderModuleSpec` declarations | **New** |
 | upstream SGLang encoder modules | Own encoder kernels, native `ColumnParallelLinear` / `RowParallelLinear`, weight sharding, NCCL collectives | **Reused** |
 
@@ -59,6 +77,11 @@ new:  Stage -> EncoderScheduler -> SGLangEncoderWorker -> upstream encoder submo
 > supports the `single/leader/follower` split; we are adding a new scheduler
 > **shape**, not a new stage type. This matches the same boundary
 > `OmniScheduler` and `SimpleScheduler` already obey today.
+>
+> Terminology: existing Stage / StageGroup code keeps its
+> `single/leader/follower` role names. New encoder scheduler / runner code uses
+> `entry_rank` and `non_entry_rank` for TP rank roles: rank 0 owns external IO;
+> non-entry ranks never elect or take over.
 
 ### Why This Shape
 
@@ -78,16 +101,17 @@ Three observations from the code walk drive Plan B:
    and `tp_size>1` lanes](#gpu-placement-across-tp_size1-and-tp_size1-lanes)
    for the load-bearing reason and the exact change.
 
-2. **The leader/follower control fan-out is already wired, but data-plane
-   fan-out is not.** `Stage.run()` mirrors `Shutdown/Profiler/Abort` from
-   leader to followers via `TPLeaderFanout.fanout_control` /
-   `fanout_abort`. It explicitly does **not** mirror `SubmitMessage` /
-   `DataReadyMessage` — those go through ZMQ to leader only, and
-   `Stage._drain_outbox_follower` refuses to emit external traffic.
-   Followers also do not have a relay endpoint and never call
+2. **The Stage-level leader/follower control fan-out is already wired, but
+   data-plane fan-out is not.** `Stage.run()` mirrors
+   `Shutdown/Profiler/Abort` from the existing Stage leader to Stage
+   followers via `TPLeaderFanout.fanout_control` / `fanout_abort`. It
+   explicitly does **not** mirror `SubmitMessage` / `DataReadyMessage` —
+   those go through ZMQ to the Stage leader only, and
+   `Stage._drain_outbox_follower` refuses to emit external traffic. Stage
+   followers also do not have a relay endpoint and never call
    `relay_io.read_payload`. This means the `EncoderScheduler` is the only
-   layer that can hand inputs to followers, and it must do so over the
-   SGLang TP groups (CPU for metadata, device for tensors).
+   layer that can hand inputs to `non_entry_rank`s, and it must do so over
+   the SGLang TP groups (CPU for metadata, device for tensors).
 
 3. **`OmniScheduler` has already proven the in-scheduler TP broadcast
    pattern for control-shaped messages.** `OmniScheduler._recv_scheduler_messages`
@@ -99,8 +123,8 @@ Three observations from the code walk drive Plan B:
    should stay the minimal local-CPU/GPU callable runner.
 
 The missing pieces are therefore one new scheduler shape (`EncoderScheduler`)
-that owns metadata + tensor broadcast, and one minimal SGLang worker
-(`SGLangEncoderWorker`) that owns the distributed init plus partial
+that owns metadata + tensor broadcast, and one minimal SGLang runner
+(`SGLangEncoderRunner`) that owns the distributed init plus partial
 encoder-submodule loading. "Reuse upstream" means reuse SGLang's TP runtime,
 loader machinery, and encoder module implementations — not instantiate the
 full upstream `ForConditionalGeneration` entry class inside every encoder
@@ -116,7 +140,7 @@ Plan B reuses upstream at the **right granularity**:
 - Declared locally: which encoder submodules a stage needs, which checkpoint
   prefixes map to those submodules, and how v1 `PipelineState` becomes the
   upstream `MultimodalDataItem` shape.
-- Not reused in encoder workers: the full upstream
+- Not reused in encoder runners: the full upstream
   `ForConditionalGeneration` class. That class is the serving entry point for
   full generation and can allocate language-model / talker modules that an
   encoder stage must never own.
@@ -157,7 +181,7 @@ sglang_omni_v1/
 |-- scheduling/
 |   `-- encoder_scheduler.py        # TP-aware scheduler for encoder stages [NEW]
 |-- model_runner/
-|   `-- sglang_encoder_worker.py    # Minimal SGLang-native encoder worker [NEW]
+|   `-- sglang_encoder_runner.py    # Minimal SGLang-native encoder runner [NEW]
 `-- models/
     `-- qwen3_omni/
         |-- encoder_adapters.py     # v1 <-> SGLang adapter (with BatchPlan) [NEW]
@@ -204,7 +228,7 @@ sglang_omni_v1/
 This is the section the earlier draft missed. It is the load-bearing contract
 of the whole RFC.
 
-### Why followers need their own input fan-out
+### Why non-entry ranks need their own input fan-out
 
 In v1, `Stage._on_data_ready()` is the only path that materializes a
 `StagePayload`: it reads `relay_io.read_payload(...)`, which fetches the
@@ -212,14 +236,15 @@ tensor blobs the upstream stage wrote into the relay and re-attaches them
 into the payload `data` dict tree (`relay_io.py:170-200`). For TP encoder
 stages:
 
-- Only the leader has a ZMQ recv endpoint and a relay reader. Followers'
-  control plane is `TPFollowerControlPlane` (`pipeline/tp_control.py:59-117`),
-  which only handles `Shutdown/Profiler/Abort`.
+- Only the Stage leader / scheduler `entry_rank` has a ZMQ recv endpoint
+  and a relay reader. Stage followers' control plane is
+  `TPFollowerControlPlane` (`pipeline/tp_control.py:59-117`), which only
+  handles `Shutdown/Profiler/Abort`.
 - `Stage._drain_outbox_follower` (`stage/runtime.py:490-508`) actively
-  refuses any external traffic from follower ranks.
+  refuses any external traffic from non-entry ranks.
 
-So when an `image_encoder` request arrives, only the leader's
-`scheduler.inbox` ever receives an `IncomingMessage`. Followers' inboxes
+So when an `image_encoder` request arrives, only the `entry_rank`
+`scheduler.inbox` ever receives an `IncomingMessage`. Non-entry-rank inboxes
 stay empty unless the **scheduler itself** ships the inputs to them.
 
 ### Why `broadcast_pyobj` of the whole message is wrong
@@ -250,10 +275,10 @@ does the metadata/tensor extraction we need):
 
 2. **Tensors over the TP device group, on GPU.** For each tensor in the
    entry rank's `tensor_dict`, do `dist.broadcast(tensor,
-   src=tp_group.ranks[0], group=tp_group.device_group)`. Followers
+   src=tp_group.ranks[0], group=tp_group.device_group)`. Non-entry ranks
    pre-allocate empty tensors matching the broadcast `_tensor_specs` on
    `cuda:<local 0>` and call the matching `dist.broadcast` to receive into
-   them. After all tensors are received, followers run
+   them. After all tensors are received, non-entry ranks run
    `restore_tensors(metadata, tensor_dict)` to rebuild the payload `data`
    and reconstitute the `IncomingMessage` list.
 
@@ -262,19 +287,19 @@ does the metadata/tensor extraction we need):
 The default v1 relay backend is `shm`, and `_resolve_relay_config` in
 `pipeline/mp_runner.py:228-240` deliberately does **not** inject `gpu_id`
 into the relay config when the backend is shm — shm copies into host
-shared memory, so the leader's reconstructed payload tensors live on
+shared memory, so the entry rank's reconstructed payload tensors live on
 **CPU**. NCCL `dist.broadcast` over the TP device group requires CUDA
 tensors on the local rank's device. Therefore the contract is:
 
-- **Leader**, before broadcasting: for every tensor extracted from the
-  payload, run `t = t.to(self.worker.device, non_blocking=True)` (where
-  `self.worker.device` is `cuda:0` after the per-process
+- **Entry rank**, before broadcasting: for every tensor extracted from the
+  payload, run `t = t.to(self.runner.device, non_blocking=True)` (where
+  `self.runner.device` is `cuda:0` after the per-process
   `CUDA_VISIBLE_DEVICES` remap). Then `dist.broadcast(t, src,
   group=tp.device_group)`. Stash the device-resident tensor back into the
   `tensor_dict` so `restore_tensors` reattaches the GPU copy, not the
   original CPU one.
-- **Followers**, before broadcasting: allocate the placeholder via
-  `torch.empty(spec.shape, dtype=spec.dtype, device=self.worker.device)`
+- **Non-entry ranks**, before broadcasting: allocate the placeholder via
+  `torch.empty(spec.shape, dtype=spec.dtype, device=self.runner.device)`
   and broadcast into it.
 
 Why this direction:
@@ -296,7 +321,7 @@ Why this direction:
    (`disaggregation/encode_server.py:222-244`).
 
 If a future model integrates a non-shm relay (`nccl`, `nixl`) that already
-delivers GPU tensors, the leader-side `.to(device)` becomes a no-op.
+delivers GPU tensors, the entry-rank-side `.to(device)` becomes a no-op.
 
 This is structurally identical to upstream `relay_io.write_payload` /
 `read_payload`, just over the SGLang TP collectives instead of the relay
@@ -344,7 +369,7 @@ def _collect_batch_or_error(
 def _recv_messages(
     self,
 ) -> tuple[list[IncomingMessage], BaseException | None]:
-    """Drain inbox and broadcast inputs to TP followers.
+    """Drain inbox on entry_rank and broadcast inputs to non_entry_ranks.
 
     Never raises — returns (messages, error). The error is non-None if
     either rank failed during this iteration's recv. Drained messages
@@ -355,7 +380,7 @@ def _recv_messages(
     relay delivers CPU tensors and upstream get_image_feature() /
     get_video_feature() only call .type(dtype), not .to(device).
     """
-    if self.worker.tp_size == 1:
+    if self.runner.tp_size == 1:
         # Cost-capped collect uses adapter request_cost_fn, so it is
         # part of the recv error boundary rather than a guaranteed-safe
         # prelude. This keeps request-level error semantics even in the
@@ -369,19 +394,19 @@ def _recv_messages(
             return local, exc
         return self._reattach_lifted_tensors(meta_msgs, tensor_lists, specs_lists), None
 
-    tp = self.worker.tp_group
+    tp = self.runner.tp_group
     src_rank = tp.ranks[0]
 
-    if self.worker.is_entry_rank:
+    if self.runner.is_entry_rank:
         # Cost cap runs on the entry rank only — the broadcast below
         # ships the entry rank's already-bounded `local` list to
-        # followers, so all ranks see the same admission decision.
+        # non-entry ranks, so all ranks see the same admission decision.
         local, collect_err = self._collect_batch_or_error()
         if collect_err is not None:
             # request_cost_fn is adapter/model code. Treat admission
             # failures as pre-metadata recv failures, otherwise
-            # followers block forever in broadcast_pyobj waiting for a
-            # metadata payload that the entry rank never sends.
+            # non-entry ranks block forever in broadcast_pyobj waiting
+            # for a metadata payload that the entry rank never sends.
             broadcast_pyobj(
                 [{"kind": _RECV_ERROR_KIND, "error": repr(collect_err)}],
                 tp.rank, tp.cpu_group, src=src_rank,
@@ -390,7 +415,7 @@ def _recv_messages(
 
         # _strip_and_lift does the H2D copy + dtype coercion that can
         # OOM / TypeError; it must also fail through the same sentinel
-        # path *before* the metadata broadcast, otherwise followers
+        # path *before* the metadata broadcast, otherwise non-entry ranks
         # block on it forever and the runner can't see it
         # (mp_runner.py:332-342 only catches exit-code failures).
         try:
@@ -400,7 +425,7 @@ def _recv_messages(
             # pickle.dumps / pickle.loads round-trip
             # (sglang utils/common.py:1286, 1309). Identity-based
             # sentinels (e.g. `object()`) would not, since pickle
-            # reconstructs a fresh instance on each follower.
+            # reconstructs a fresh instance on each non-entry rank.
             broadcast_pyobj(
                 [{"kind": _RECV_ERROR_KIND, "error": repr(exc)}],
                 tp.rank, tp.cpu_group, src=src_rank,
@@ -417,7 +442,7 @@ def _recv_messages(
         # Allocation-ready handshake — see "Allocation-ready gather"
         # note below. Entry rank's tensors are already on device from
         # _strip_and_lift, so its allocation step is a no-op; it still
-        # has to participate in the gather so any follower OOM unwinds
+        # has to participate in the gather so any non-entry-rank OOM unwinds
         # both ranks before the device broadcast fires.
         ok_flags = self._allocation_ready_gather(local_ok=True)
         if not all(ok_flags):
@@ -431,7 +456,7 @@ def _recv_messages(
             None,
         )
 
-    # follower path
+    # non-entry-rank path
     payload = broadcast_pyobj([], tp.rank, tp.cpu_group, src=src_rank)
     if (
         payload
@@ -447,7 +472,7 @@ def _recv_messages(
     # *before* any device broadcast, then synchronize success across
     # ranks. If any rank's allocation fails (typically OOM on a long
     # video pixel buffer), every rank skips the device broadcast loop
-    # and returns an error tuple. Without this gather, a follower OOM
+    # and returns an error tuple. Without this gather, a non-entry-rank OOM
     # mid-loop would leave the entry rank stuck waiting on the
     # corresponding `dist.broadcast` receiver.
     placeholders: list[list[torch.Tensor]] = []
@@ -457,7 +482,7 @@ def _recv_messages(
             placeholders.append(
                 [
                     torch.empty(spec.shape, dtype=spec.dtype,
-                                device=self.worker.device)
+                                device=self.runner.device)
                     for spec in specs
                 ]
             )
@@ -487,9 +512,9 @@ def _recv_messages(
 
 def _allocation_ready_gather(self, *, local_ok: bool) -> list[bool]:
     """Gather per-rank allocation-success flags on the TP CPU group."""
-    flags = [False] * self.worker.tp_size
+    flags = [False] * self.runner.tp_size
     dist.all_gather_object(
-        flags, local_ok, group=self.worker.tp_group.cpu_group,
+        flags, local_ok, group=self.runner.tp_group.cpu_group,
     )
     return flags
 
@@ -523,7 +548,7 @@ identity sentinel. `broadcast_pyobj` does a full
 (`sglang/python/sglang/srt/utils/common.py:1286, 1309`); singleton
 identity does not survive that, but `dict.get("kind") == "encoder_recv_error"`
 does. The collective itself is the same `broadcast_pyobj` call
-followers were already going to await, so the error rides the
+non-entry ranks were already going to await, so the error rides the
 existing channel.
 
 `_recv_messages` deliberately **never raises**. Returning
@@ -539,19 +564,19 @@ stage-level abort.
 #### Allocation-ready gather
 
 The metadata `broadcast_pyobj` only synchronizes *what to receive*,
-not *whether the receivers are ready*. The follower then has to call
+not *whether the receivers are ready*. The non-entry rank then has to call
 `torch.empty(spec.shape, ..., device=cuda:0)` for every incoming
 tensor, and on a long-video / multi-image batch that allocation can
 OOM. Naïvely starting `dist.broadcast` from the entry rank
 immediately after the metadata broadcast hits a deadlock in that
-case: a follower OOMs mid-allocation and aborts its receive loop,
+case: a non-entry rank OOMs mid-allocation and aborts its receive loop,
 while the entry rank is already blocked inside an unmatched
 `dist.broadcast` call.
 
 Plan B inserts an `all_gather_object`-style "alloc ok?" handshake
 between the metadata broadcast and the first `dist.broadcast`:
 
-1. Followers pre-allocate **all** receive tensors up front (fail
+1. Non-entry ranks pre-allocate **all** receive tensors up front (fail
    fast if any spec OOMs).
 2. The entry rank participates in the gather as a no-op (its
    tensors already exist).
@@ -566,17 +591,17 @@ makes the device broadcast loop unconditionally safe to enter once
 it starts.
 
 `_strip_and_lift` calls `extract_tensors`, then for each extracted tensor
-runs `t = t.to(self.worker.device, non_blocking=True)` and records
+runs `t = t.to(self.runner.device, non_blocking=True)` and records
 `(path, shape, dtype)` into a small `_TensorSpec` dataclass. The metadata
 broadcast pickles only the spec list, not the tensors. `_reattach_lifted_tensors`
 runs `restore_tensors` on the entry rank with the GPU-resident tensors so
 that the entry rank's downstream `BatchPlan` sees the same device-resident
-tensors the followers will reconstruct.
+tensors the non-entry ranks will reconstruct.
 
 > **Why keep typed `_TensorSpec` instead of reusing the placeholder.**
 > The placeholder dict `extract_tensors` produces stringifies dtype
 > and device (`relay_io.py:48-49`: `"dtype": str(obj.dtype)` →
-> `"torch.float16"`, not the `torch.dtype` object). Follower-side
+> `"torch.float16"`, not the `torch.dtype` object). Non-entry-rank-side
 > `torch.empty(shape, dtype=placeholder["dtype"], device=...)` would
 > raise `TypeError: dtype must be a torch.dtype`. The implementation
 > PR has two options: (a) carry a typed `_TensorSpec(path, shape,
@@ -622,7 +647,7 @@ scheduler-type branch.
 class EncoderScheduler:
     def __init__(
         self,
-        worker: "SGLangEncoderWorker",
+        runner: "SGLangEncoderRunner",
         adapter: "EncoderAdapter",
         *,
         max_batch_size: int = 32,
@@ -630,7 +655,7 @@ class EncoderScheduler:
         request_cost_fn: Callable[[Any], int] | None = None,
         max_batch_cost: int | None = None,        # activation_budget_bytes
     ):
-        self.worker = worker
+        self.runner = runner
         self.adapter = adapter
         self.inbox = queue.Queue()
         self.outbox = queue.Queue()
@@ -675,7 +700,7 @@ def start(self) -> None:
         messages, recv_err = self._recv_messages()
         if recv_err is not None:
             if self._gather_pre_forward_error(recv_err):
-                if self.worker.is_entry_rank:
+                if self.runner.is_entry_rank:
                     self._emit_error(messages, recv_err)
                 continue
         if not messages:
@@ -692,7 +717,7 @@ def start(self) -> None:
             build_err = exc
 
         if self._gather_pre_forward_error(build_err):
-            if self.worker.is_entry_rank:
+            if self.runner.is_entry_rank:
                 self._emit_error(
                     messages,
                     build_err if build_err is not None
@@ -701,12 +726,12 @@ def start(self) -> None:
             continue
 
         try:
-            raw = self.worker.encode_batch(plan)                 # all ranks
+            raw = self.runner.encode_batch(plan)                 # all ranks
         except Exception as exc:                                 # noqa: BLE001
             self._fatal_tp_forward_error(exc)
             raise                                               # unreachable
 
-        if not self.worker.is_entry_rank:
+        if not self.runner.is_entry_rank:
             continue
 
         try:
@@ -723,13 +748,13 @@ def start(self) -> None:
 
 def _gather_pre_forward_error(self, local_err: BaseException | None) -> bool:
     """Synchronize recoverable recv/build errors before model collectives."""
-    if self.worker.tp_size <= 1:
+    if self.runner.tp_size <= 1:
         return local_err is not None
-    err_flags: list[bool] = [False] * self.worker.tp_size
+    err_flags: list[bool] = [False] * self.runner.tp_size
     dist.all_gather_object(
         err_flags,
         local_err is not None,
-        group=self.worker.tp_group.cpu_group,
+        group=self.runner.tp_group.cpu_group,
     )
     return any(err_flags)
 
@@ -818,8 +843,8 @@ raises `BatchCollectError(messages, cause)` with every message already
 drained in this iteration. `_recv_messages()` converts that into its
 normal `(messages, error)` return; in TP mode, the entry rank also sends
 the same `_RECV_ERROR_KIND` sentinel used for `_strip_and_lift` failures
-before followers wait for metadata. That preserves both properties we
-need: no request is silently dropped, and followers never block forever
+before non-entry ranks wait for metadata. That preserves both properties we
+need: no request is silently dropped, and non-entry ranks never block forever
 on a metadata broadcast that the entry rank skipped.
 
 ### Where admission control runs in `_recv_messages`
@@ -827,9 +852,9 @@ on a metadata broadcast that the entry rank skipped.
 `_collect_batch_from_inbox` is the **single point of truth** for the
 admission decision: it runs only on the entry rank (or in the
 single-rank case), and the broadcast that follows ships the
-already-bounded list to followers. If both ranks ran the cost cap
+already-bounded list to non-entry ranks. If both ranks ran the cost cap
 independently, divergent decisions would desync the broadcast
-structure — followers must never touch the inbox.
+structure — non-entry ranks must never touch the inbox.
 
 The single canonical sketch lives in
 [Two-channel broadcast contract](#two-channel-broadcast-contract)
@@ -840,10 +865,10 @@ no separate "admission-control variant" of `_recv_messages`.
 
 1. Drain the stage inbox **on the entry rank only**. Entry rank is rank 0
    inside the SGLang TP group, matching `OmniScheduler.is_entry_rank`.
-2. Broadcast metadata + tensors to follower ranks via the two-channel
+2. Broadcast metadata + tensors to non-entry ranks via the two-channel
    contract above.
 3. Build a deterministic `BatchPlan` on all ranks using `adapter.build_batch`.
-4. Run `worker.encode_batch(plan)` on every rank. Forward executes the
+4. Run `runner.encode_batch(plan)` on every rank. Forward executes the
    upstream encoder; SGLang's `ColumnParallelLinear` / `RowParallelLinear`
    issue collectives internally.
 5. Emit `OutgoingMessage` to the outbox **only on the entry rank**.
@@ -885,15 +910,15 @@ it:
 `SimpleScheduler` stays as-is and remains the fallback path for
 non-upstreamed encoders.
 
-## SGLangEncoderWorker
+## SGLangEncoderRunner
 
-`SGLangEncoderWorker` is a minimal SGLang-native encoder worker. It does
+`SGLangEncoderRunner` is a minimal SGLang-native encoder runner. It does
 **not** start `MMEncoder` or any HTTP server: v1 already owns
 preprocessing, control plane, relay, request lifecycle, and cache metadata.
-The worker only owns SGLang's distributed state and the loaded upstream
+The runner only owns SGLang's distributed state and the loaded upstream
 encoder submodules for the current stage.
 
-Important boundary: encoder workers must **not** instantiate the upstream
+Important boundary: encoder runners must **not** instantiate the upstream
 full `ForConditionalGeneration` class. For Qwen3-Omni,
 `Qwen3OmniMoeForConditionalGeneration` constructs a thinker, and the
 thinker constructs language + audio + vision modules. Loading that in the
@@ -927,9 +952,9 @@ calls, not the surrounding ZMQ/cache/transfer-engine machinery):
 ### EncoderModuleSpec
 
 Every SGLang-backed encoder stage provides a tiny module declaration. This
-is the only model-specific part of the worker; it says which upstream
+is the only model-specific part of the runner; it says which upstream
 encoder submodules to instantiate and which checkpoint prefixes belong to
-them. The shared worker handles distributed init, `ServerArgs`, `ModelConfig`,
+them. The shared runner handles distributed init, `ServerArgs`, `ModelConfig`,
 `LoadConfig`, checkpoint iteration, protected override checks, and device
 placement.
 
@@ -985,10 +1010,10 @@ This is a load-bearing detail because v1's per-process CUDA env remap
 in `pipeline/stage_process.py:222-249` is gated on `tp_size > 1`. The
 contract Plan B requires is:
 
-> The SGLangEncoderWorker process always sees exactly one CUDA device
+> The SGLangEncoderRunner process always sees exactly one CUDA device
 > as `cuda:0`, regardless of `tp_size`. The configured physical GPU is
 > mapped onto `cuda:0` by the launcher before `torch` is imported.
-> Worker code uses `cuda_device=0`, `dist_local_rank=tp_rank` (which is
+> Runner code uses `cuda_device=0`, `dist_local_rank=tp_rank` (which is
 > `0` when `tp_size=1`).
 
 This is the contract that lines up with how SGLang internally treats
@@ -1025,7 +1050,7 @@ local-master / shard-index slot, which is undefined for
 #### Required launcher change
 
 `backend="sglang"` stages — including `tp_size=1` — must reach the
-worker through a process whose `CUDA_VISIBLE_DEVICES` has been remapped
+runner through a process whose `CUDA_VISIBLE_DEVICES` has been remapped
 to a single physical GPU and whose `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`
 is set, exactly as `_prepare_cuda_environment` already does for
 `tp_size>1`.
@@ -1052,7 +1077,7 @@ The Phase-0 PR therefore extends the launcher path:
    the case where the user flips a stage to `backend="sglang"` via
    `PipelineConfig.runtime_overrides` (CLI / config-file path) without
    editing the StageConfig itself, leaving `single_visible_device=False`
-   while the worker still expects to be the only visible CUDA device.
+   while the runner still expects to be the only visible CUDA device.
 
    The runner cannot wait for `_resolve_backend(...)` because that runs
    inside the factory in the child process, after `torch` is imported.
@@ -1094,8 +1119,8 @@ The Phase-0 PR therefore extends the launcher path:
 
    - The single-visible-device remap from step 1 never fires —
      `gpu=4, tp_size=1` would silently load the encoder on physical
-     GPU 0 because the worker fixes `cuda_device=0`.
-   - Multiple `SGLangEncoderWorker` instances in the same process would
+     GPU 0 because the runner fixes `cuda_device=0`.
+   - Multiple `SGLangEncoderRunner` instances in the same process would
      fight over the global `init_distributed_environment` state, which
      is module-level inside SGLang and can only be initialized once
      per process.
@@ -1118,7 +1143,7 @@ The Phase-0 PR therefore extends the launcher path:
    resolved `factory_args["backend"]` is `"sglang"` or `"auto"`,
    **and** any stage with `stage_cfg.tp_size > 1`. The single-process
    compile path is by construction incompatible with the SGLang
-   encoder worker (no per-rank subprocess) and equally unable to
+   encoder runner (no per-rank subprocess) and equally unable to
    honor TP for **any** factory: `_resolve_factory_args` only injects
    `model_path` / `gpu_id`, never `tp_rank` / `tp_size` /
    `nccl_port` (`config/compiler.py:138-158`). A direct
@@ -1172,16 +1197,16 @@ The Phase-0 PR therefore extends the launcher path:
 
    The two layers cover distinct failure modes:
 
-   - **Layer 1** catches "factory has no idea about TP". Example: a
-     `SimpleScheduler` callable like
+   - **Layer 1** catches "factory has no idea about TP". Example: an
+     existing non-encoder `SimpleScheduler` callable like
      `create_aggregate_executor()` (no TP params in signature)
      mis-configured with `tp_size=2`. Without this layer, the
      launcher would still hit `any_tp → needs_mp`, spawn N
      subprocesses, then fail in each child either at factory
      argument-binding time (mp_runner injects `tp_rank/tp_size/nccl_port`
      kwargs the factory does not accept → `TypeError`) or — if the
-     factory uses `**kwargs` — at follower-IO time when the stage
-     can't actually fan-out batches. Layer 1 fails loud in the main
+     factory uses `**kwargs` — at Stage follower IO time when the stage
+     can't actually fan out batches. Layer 1 fails loud in the main
      process before any spawn.
    - **Layer 2** catches "factory has a backend knob but the user
      left it on local". Encoder factories accept `backend` *and*
@@ -1226,8 +1251,8 @@ defaults.** The implication is load-bearing:
   with explicit `factory_args["backend"]` set, never lean on signature
   defaults.
 
-After this change, `SGLangEncoderWorker` sees `cuda:0` in both lanes
-and the worker's GPU placement collapses to one rule:
+After this change, `SGLangEncoderRunner` sees `cuda:0` in both lanes
+and the runner's GPU placement collapses to one rule:
 
 ```python
 cuda_device = 0
@@ -1259,10 +1284,10 @@ and `get_tp_group()` asserts the group has been initialized
 (`parallel_state.py:1482`). Skipping init at `tp_size=1` would crash at
 model load time with `tensor model parallel group is not initialized`.
 
-`SGLangEncoderWorker` therefore initializes distributed state **always**:
+`SGLangEncoderRunner` therefore initializes distributed state **always**:
 
 ```python
-class SGLangEncoderWorker:
+class SGLangEncoderRunner:
     def __init__(
         self,
         *,
@@ -1279,6 +1304,7 @@ class SGLangEncoderWorker:
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.is_entry_rank = (tp_rank == 0)
+        self.is_non_entry_rank = not self.is_entry_rank
 
         # tp_size=1 also gets a real init: see `Distributed init is
         # unconditional`.  Use a free-port loopback when the parent did not
@@ -1300,21 +1326,21 @@ class SGLangEncoderWorker:
         dist_local_rank = tp_rank
         self.device = torch.device(f"cuda:{cuda_device}")
 
-        # Worker-managed kwargs that build_sglang_encoder_server_args is
+        # Runner-managed kwargs that build_sglang_encoder_server_args is
         # about to receive as explicit positional/keyword arguments.
         # We must reject these in `server_args_overrides` BEFORE the
         # **splat below — otherwise Python raises TypeError "got multiple
         # values for keyword argument" before our helper's protected-key
         # check ever runs.
         overrides = dict(server_args_overrides or {})
-        worker_managed = {
+        runner_managed = {
             "model_path", "tp_size", "base_gpu_id", "dist_init_addr",
             "dtype", "load_format",
         }
-        clobbered = sorted(worker_managed & overrides.keys())
+        clobbered = sorted(runner_managed & overrides.keys())
         if clobbered:
             raise ValueError(
-                f"server_args_overrides cannot set worker-managed keys "
+                f"server_args_overrides cannot set runner-managed keys "
                 f"{clobbered}. These are derived from StageConfig and "
                 f"factory parameters; pass them through StageConfig "
                 f"(model_path, tp_size, gpu, dtype, load_format) instead."
@@ -1353,8 +1379,8 @@ class SGLangEncoderWorker:
 
         # Always run, including tp_size == 1.
         # `local_rank` here is identity (used for local-master checks),
-        # NOT a CUDA index. Passing tp_rank lets followers see themselves
-        # as non-zero local_rank in custom_all_reduce_utils.py:280 and
+        # NOT a CUDA index. Passing tp_rank lets non-entry ranks see
+        # themselves as non-zero local_rank in custom_all_reduce_utils.py:280 and
         # friends. Device selection is governed by
         # SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS in the tp>1 lane.
         init_distributed_environment(
@@ -1444,7 +1470,7 @@ We therefore add a sibling helper next to the AR builder. For encoder
 stages, tensor parallelism has exactly one source of truth:
 `StageConfig.tp_size` plus `StageConfig.gpu`. `MultiProcessPipelineRunner`
 turns those fields into the per-rank `tp_rank`, `tp_size`, `gpu_id`, and
-`nccl_port` kwargs that reach `SGLangEncoderWorker`. `server_args_overrides`
+`nccl_port` kwargs that reach `SGLangEncoderRunner`. `server_args_overrides`
 is only for safe SGLang loading/runtime knobs such as quantization,
 attention backend, and remote weight loading; it must not be able to
 change rank topology or GPU placement after the runner has already
@@ -1453,7 +1479,7 @@ spawned processes.
 ```python
 # sglang_omni_v1/scheduling/sglang_backend/server_args_builder.py
 
-# Worker invariants that must NOT be reachable from server_args_overrides.
+# Runner invariants that must NOT be reachable from server_args_overrides.
 # Mutating these would either invalidate GPU placement, change the
 # parallelism axis we promised, or flip the encoder-vs-language-only
 # fork. See "GPU placement..." and Open Question 2 (encoder DP).
@@ -1475,7 +1501,7 @@ _ENCODER_PROTECTED_KEYS = frozenset({
     "base_gpu_id",
     "nccl_port",
     "dist_init_addr",
-    # Encoder worker invariants
+    # Encoder runner invariants
     "encoder_only",
     "language_only",
     "mm_enable_dp_encoder",
@@ -1484,12 +1510,12 @@ _ENCODER_PROTECTED_KEYS = frozenset({
     "enable_dp_lm_head",
     "disable_cuda_graph",
     "device",
-    # AR-only knobs that have no meaning for an encoder-only worker.
+    # AR-only knobs that have no meaning for an encoder-only runner.
     # Locked so users cannot reintroduce SGLang AR memory semantics
     # through server_args_overrides — the encoder path explicitly does
     # not own a KV pool, an AR running queue, or a chunked-prefill
     # budget, and any value set here would be silently accepted by
-    # ServerArgs but would diverge from what the worker actually does.
+    # ServerArgs but would diverge from what the runner actually does.
     "mem_fraction_static",
     "max_running_requests",
     "max_prefill_tokens",
@@ -1508,7 +1534,7 @@ def build_sglang_encoder_server_args(
     load_format: str | None = None,
     **overrides: Any,
 ) -> ServerArgs:
-    """ServerArgs configured for an encoder-only worker.
+    """ServerArgs configured for an encoder-only runner.
 
     Distinct from build_sglang_server_args because encoder stages do not
     have a meaningful context_length / mem_fraction_static / running queue.
@@ -1520,7 +1546,7 @@ def build_sglang_encoder_server_args(
     if bad:
         raise ValueError(
             f"server_args_overrides cannot override protected keys: {bad}. "
-            f"These are decided by the worker / pipeline runner; pass them "
+            f"These are decided by the runner / pipeline runner; pass them "
             f"through StageConfig (tp_size, gpu) instead."
         )
 
@@ -1555,10 +1581,10 @@ The protected-key reject covers:
   Phase 0 starts exactly `StageConfig.tp_size` local ranks; DP, EP,
   attention-CP, and multinode shapes are out of scope and cannot be
   activated through `server_args_overrides`.
-- `encoder_only` / `language_only` — the worker no longer relies on the
+- `encoder_only` / `language_only` — the runner no longer relies on the
   full upstream model factory for the encoder-vs-language split. Letting
   users flip these through overrides would make `ServerArgs` disagree with
-  the module specs the worker actually loads.
+  the module specs the runner actually loads.
 - `mm_enable_dp_encoder` — Phase 0–2 require encoder TP only; allowing
   this through `overrides` would silently violate the rejection rule
   the factory layer also enforces.
@@ -1568,11 +1594,11 @@ The protected-key reject covers:
   described in this RFC.
 - `disable_cuda_graph` — Phase 0 requires variable shapes; piecewise
   CUDA graph for encoder ViT lands later (PR #15320 / #16785 area).
-- `device` — `SGLangEncoderWorker` hardcodes `DeviceConfig(device="cuda", ...)`
+- `device` — `SGLangEncoderRunner` hardcodes `DeviceConfig(device="cuda", ...)`
   and `get_default_distributed_backend("cuda")`. Letting `overrides`
   flip `ServerArgs.device` to `cpu/npu/xpu/mps` (the values
   `server_args.py:1218-1244` recognizes) would split the two: SGLang's
-  internals would think the worker is on CPU/NPU while we still issue
+  internals would think the runner is on CPU/NPU while we still issue
   CUDA distributed calls. Cross-backend encoder support is a separate
   workstream and should not be reachable through a one-line override.
 
@@ -1581,18 +1607,18 @@ Loader / processor knobs (`model_loader_extra_config`,
 are **not** protected and pass through unchanged via
 `server_args_overrides` — those are exactly the fields users need to
 forward for FP8 / NVFP4 / remote-streaming deployments. `dtype` and
-`load_format` are also supported, but as top-level factory / worker
+`load_format` are also supported, but as top-level factory / runner
 arguments rather than `server_args_overrides`, to avoid duplicate keyword
 binding before the protected-key helper runs.
 
 `model_path`, `tp_size`, `base_gpu_id`, `dist_init_addr`, `dtype`, and
-`load_format` are rejected one level earlier in `SGLangEncoderWorker`
+`load_format` are rejected one level earlier in `SGLangEncoderRunner`
 because the helper receives them as explicit keyword arguments. That
 early reject is intentional: otherwise Python would raise a generic
 "got multiple values for keyword argument" `TypeError` before the
 protected-key check can produce the source-of-truth error message.
 
-`SGLangEncoderWorker.__init__` calls this helper directly. AR-only
+`SGLangEncoderRunner.__init__` calls this helper directly. AR-only
 knobs (`mem_fraction_static`, `max_running_requests`,
 `max_prefill_tokens`, `chunked_prefill_size`, `context_length`) are
 intentionally absent from the helper signature **and** are listed in
@@ -1600,11 +1626,11 @@ intentionally absent from the helper signature **and** are listed in
 `server_args_overrides`. `ServerArgs` falls back to its own defaults
 for those AR fields, and the encoder-only code path never reads them
 — protecting them keeps a stale-AR-knob from silently propagating
-into `ServerArgs` even though the worker ignores it.
+into `ServerArgs` even though the runner ignores it.
 
 ### LoadConfig fidelity
 
-`SGLangEncoderWorker.__init__` constructs `LoadConfig` with the same six
+`SGLangEncoderRunner.__init__` constructs `LoadConfig` with the same six
 fields upstream `MMEncoder.__init__` does
 (`disaggregation/encode_server.py:202-208`):
 
@@ -1651,7 +1677,7 @@ re-implementer. Reading the lower half of `MMEncoder.__init__` and copying
 just the eight calls listed above is genuinely smaller and lets v1 keep
 ownership of the request lifecycle. (See
 [Open Questions](#open-questions) about whether SGLang main should expose a
-small `EncoderModelWorker` helper to remove the copy.)
+small `EncoderModelRunner` helper to remove the copy.)
 
 ## EncoderAdapter and BatchPlan
 
@@ -2029,7 +2055,7 @@ MVP requires no schema change. Encoder TP is expressed entirely in
 ```python
 StageConfig(
     name="image_encoder",
-    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_executor",
+    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_runner",
     factory_args={
         "backend": "sglang",
         "max_batch_size": 32,
@@ -2052,7 +2078,7 @@ StageConfig(
 ### Factory contract
 
 ```python
-def create_image_encoder_executor(
+def create_image_encoder_runner(
     model_path: str,
     *,
     # IMPORTANT: this signature default is `"local"` and stays "local"
@@ -2064,7 +2090,7 @@ def create_image_encoder_executor(
     # ever changed the default to `"auto"`, a StageConfig that omits
     # `factory_args["backend"]` would silently disagree: launcher reads
     # "local" → goes single-process, factory body picks up "auto" →
-    # tries to start an SGLang worker. To switch a deployment to the
+    # tries to start an SGLang runner. To switch a deployment to the
     # SGLang backend, write `factory_args["backend"]="auto"` (or
     # `"sglang"`) into the StageConfig (or `runtime_overrides`)
     # explicitly — never rely on this default to flip.
@@ -2085,7 +2111,7 @@ def create_image_encoder_executor(
     chosen = _resolve_backend(backend, model_path, stage="image_encoder")
     if chosen == "sglang":
         adapter = Qwen3OmniImageEncoderAdapter(...)
-        worker = SGLangEncoderWorker(
+        runner = SGLangEncoderRunner(
             model_path=model_path,
             gpu_id=gpu_id, tp_rank=tp_rank, tp_size=tp_size, nccl_port=nccl_port,
             dtype=dtype,
@@ -2094,7 +2120,7 @@ def create_image_encoder_executor(
             server_args_overrides=server_args_overrides,
         )
         return EncoderScheduler(
-            worker=worker,
+            runner=runner,
             adapter=adapter,
             max_batch_size=max_batch_size,
             max_batch_wait_ms=max_batch_wait_ms,
@@ -2204,8 +2230,8 @@ For `image_encoder` with `tp_size=2`, end to end:
 5. Before torch import, `_prepare_cuda_environment` sets
    `CUDA_VISIBLE_DEVICES` to the mapped device for that rank and rewrites
    `factory_args["gpu_id"]=0`. (`pipeline/stage_process.py:252-276`)
-6. The factory builds `EncoderScheduler(worker=SGLangEncoderWorker(...))`.
-7. `SGLangEncoderWorker.__init__` always calls
+6. The factory builds `EncoderScheduler(runner=SGLangEncoderRunner(...))`.
+7. `SGLangEncoderRunner.__init__` always calls
    `init_distributed_environment(world_size=2, rank=tp_rank,
    distributed_init_method=f"tcp://127.0.0.1:{nccl_port}")`,
    `initialize_model_parallel(tensor_model_parallel_size=2)`, then builds
@@ -2214,16 +2240,19 @@ For `image_encoder` with `tp_size=2`, end to end:
    processes meet on the NCCL port and form the TP group. **At
    `tp_size=1` the same calls run with `world_size=1, rank=0,
    distributed_init_method=tcp://127.0.0.1:<free_port>`.**
-8. `Stage.run()` starts. Leader binds the ZMQ recv endpoint; follower binds
-   `TPFollowerControlPlane`. Both spawn a scheduler thread.
-9. `EncoderScheduler` enters its loop. Leader drains the inbox and uses
-   the two-channel broadcast to ship metadata + tensors to the follower;
-   both run forward; leader emits results to the outbox.
-10. `Stage._drain_outbox_external` (leader) routes the outbox `result`
-    messages to `mm_aggregate` via the relay.
-11. `Stage._drain_outbox_follower` (follower) discards outputs.
-12. Aborts and shutdown go from leader to follower via the existing
-    `TPLeaderFanout` queues.
+8. `Stage.run()` starts. The existing Stage leader binds the ZMQ recv
+   endpoint; the Stage follower binds `TPFollowerControlPlane`. Both spawn
+   a scheduler thread.
+9. `EncoderScheduler` enters its loop. The `entry_rank` drains the inbox and
+   uses the two-channel broadcast to ship metadata + tensors to
+   `non_entry_rank`s; all ranks run forward; `entry_rank` emits results to
+   the outbox.
+10. `Stage._drain_outbox_external` (Stage leader / entry rank) routes the
+    outbox `result` messages to `mm_aggregate` via the relay.
+11. `Stage._drain_outbox_follower` (Stage follower / non-entry rank)
+    discards outputs.
+12. Aborts and shutdown go from the Stage leader to Stage followers via the
+    existing `TPLeaderFanout` queues.
 
 ## Control Plane and Data Plane
 
@@ -2313,7 +2342,7 @@ forwards must not catch broad `Exception`.
 
 Rules:
 
-- `SGLangEncoderWorker.encode_batch` and `EncoderAdapter.run_feature` only
+- `SGLangEncoderRunner.encode_batch` and `EncoderAdapter.run_feature` only
   catch specific expected exceptions (e.g. `OutOfMemoryError` for batch
   splitting, if we ever add it). They never catch base `Exception`.
 - `EncoderScheduler.start()` has **three** error domains, not one
@@ -2341,7 +2370,7 @@ Rules:
 - **Pre-broadcast entry-rank failures**: `_recv_messages` does H2D
   copies inside `_strip_and_lift` *before* the metadata broadcast. A
   failure there (OOM, dtype coercion, malformed payload) on the
-  entry rank would leave followers blocked on `broadcast_pyobj`
+  entry rank would leave non-entry ranks blocked on `broadcast_pyobj`
   forever — the runner cannot detect this since
   `MultiProcessPipelineRunner._monitor_children`
   (`pipeline/mp_runner.py:332-342`) only fires on
@@ -2352,7 +2381,7 @@ Rules:
   broadcasts a tagged dict
   `{"kind": "encoder_recv_error", "error": repr(exc)}` over the
   same CPU-group `broadcast_pyobj` slot the success path uses, then
-  returns `(local, exc)`. Followers detect the dict by kind-string
+  returns `(local, exc)`. Non-entry ranks detect the dict by kind-string
   equality (not identity — pickle round-trip would break that) and
   return `([], RuntimeError(...))`. Both ranks then converge on the
   scheduler's pre-forward `all_gather_object` handshake without
@@ -2420,12 +2449,12 @@ then just sets `backend="sglang"` and `tp_size`.
    `EncoderModuleSpec` list for each encoder stage and implement
    `build_batch`, `run_feature`, `slice_results`.
 2. In `models/<name>/stages.py`, branch the encoder factory on `backend`:
-   `"sglang"` builds `EncoderScheduler(SGLangEncoderWorker(...), adapter)`;
+   `"sglang"` builds `EncoderScheduler(SGLangEncoderRunner(...), adapter)`;
    `"local"` keeps the existing `SimpleScheduler` path.
 3. In `models/<name>/config.py` (the `PipelineConfig`), set `tp_size` and
    `gpu=[...]` on the encoder stage.
 4. Validate that the SGLang backend loads only the declared encoder
-   prefixes (no language model / talker parameters in the encoder worker).
+   prefixes (no language model / talker parameters in the encoder runner).
 5. Validate parity: `backend="local"` vs `backend="sglang", tp_size=1` on
    the same input. Then bump `tp_size`.
 
@@ -2455,7 +2484,7 @@ Phase 0 — landing path that doesn't break v1:
      `needs_mp` predicate so any stage with resolved `backend in
      {"sglang", "auto"}` forces `MultiProcessPipelineRunner`, even on a
      single-GPU / `tp_size=1` pipeline. Without this the launcher
-     short-circuits to `compile_pipeline()` and the worker never gets
+     short-circuits to `compile_pipeline()` and the runner never gets
      the per-process CUDA remap.
    - In `config/compiler.py:compile_pipeline`, reject any stage with
      resolved `backend in {"sglang", "auto"}` **or**
@@ -2515,8 +2544,8 @@ Phase 0 — landing path that doesn't break v1:
      prevents a future signature-default flip from silently bypassing
      the CUDA isolation.
    - **Real-factory signature lock**: `import inspect` and assert that
-     `inspect.signature(create_image_encoder_executor).parameters["backend"].default == "local"`
-     and the same for `create_audio_encoder_executor`. The previous
+     `inspect.signature(create_image_encoder_runner).parameters["backend"].default == "local"`
+     and the same for `create_audio_encoder_runner`. The previous
      test only proves the resolver ignores signature defaults; this
      one proves the actual production factories never have their
      default flipped to `"auto"` or `"sglang"` by accident. Cheap to
@@ -2538,9 +2567,10 @@ Phase 0 — landing path that doesn't break v1:
      `_build_stage_groups` must succeed. Locks Layer 1 of rule 6 —
      proves the encoder reject is not over-broad.
    - **TP preflight Layer 1 (factory not TP-capable)**: build a
-     config where some stage uses a SimpleScheduler factory like
-     `create_aggregate_executor` (no `tp_rank/tp_size/nccl_port` in
-     signature) and `tp_size=2`. `_build_stage_groups` must raise
+     config where some non-encoder stage uses an existing SimpleScheduler
+     factory like `create_aggregate_executor` (no
+     `tp_rank/tp_size/nccl_port` in signature) and `tp_size=2`.
+     `_build_stage_groups` must raise
      `ValueError` listing the missing parameters. This is the case
      the previous single-layer preflight silently passed through to
      subprocess spawn.
@@ -2552,13 +2582,13 @@ Phase 0 — landing path that doesn't break v1:
      a TP config to single-rank.
    - **Allocation-ready gather (mid-recv deadlock guard)**: run
      `EncoderScheduler` with `tp_size=2` and a fake `torch.empty` on
-     the follower that raises on the **second** spec (so the first
+     the non-entry rank that raises on the **second** spec (so the first
      allocation succeeds, mimicking partial OOM). Assert (a) entry
      rank does **not** issue any `dist.broadcast(t, group=device_group)`
-     call (use a mock that records calls); (b) follower returns
+     call (use a mock that records calls); (b) the non-entry rank returns
      `(messages, error)` from `_recv_messages` instead of raising;
      (c) both ranks reach the pre-forward `all_gather_object` handshake
-     with `local_err is not None` on the follower side; (d) the
+     with `local_err is not None` on the non-entry-rank side; (d) the
      entry rank's drained `local` is forwarded via the tuple return,
      so `_emit_error(messages, ...)` produces one error message per
      drained request. Locks the `_allocation_ready_gather` contract.
@@ -2567,12 +2597,12 @@ Phase 0 — landing path that doesn't break v1:
      variants before the metadata `broadcast_pyobj`: (1) fake
      `request_cost_fn` raises inside `_collect_batch_from_inbox` after
      draining at least one request; (2) fake `_strip_and_lift` raises
-     after batch collection succeeds. Assert (a) the follower rank does
+     after batch collection succeeds. Assert (a) the non-entry rank does
      **not** block on `broadcast_pyobj` indefinitely (bounded-time wait
      with fail-on-timeout); (b) `_recv_messages` returns
      `(messages, exc)` on **both** ranks rather than raising — entry
      rank's `messages` equals the drained list for the collect-failure
-     variant, follower's `messages` is `[]`, follower's exception text
+     variant, non-entry rank's `messages` is `[]`, non-entry rank's exception text
      quotes the entry-rank exception via `repr(exc)`; (c) the
      scheduler's pre-forward `all_gather_object` handshake observes the
      recv failure and emits exactly one `OutgoingMessage(type="error")`
@@ -2585,12 +2615,12 @@ Phase 0 — landing path that doesn't break v1:
    - **Pre-forward build error recovery**: fake
      `adapter.build_batch(messages)` to raise on one rank before
      `encode_batch` is called. Assert all ranks enter the pre-forward
-     `all_gather_object` handshake, no rank calls `worker.encode_batch`,
+     `all_gather_object` handshake, no rank calls `runner.encode_batch`,
      the entry rank emits one `OutgoingMessage(type="error")` per
      drained request, and the scheduler proceeds to the next iteration.
      This locks the boundary between recoverable adapter shape errors
      and fatal TP model-forward errors.
-   - **Fatal TP forward fault**: fake `worker.encode_batch(plan)` so one
+   - **Fatal TP forward fault**: fake `runner.encode_batch(plan)` so one
      rank raises after the other rank has entered a mocked device
      collective. Assert the failing rank calls `_fatal_tp_forward_error`
      / exits non-zero instead of entering the CPU pre-forward gather,
@@ -2614,27 +2644,27 @@ Phase 0 — landing path that doesn't break v1:
      constructed. Repeat for `gpu_id`, `nccl_port`, `rank`, and
      `world_size`. This covers topology keys that reach the helper
      through `**overrides`; helper-signature keys such as `tp_size`,
-     `base_gpu_id`, and `dist_init_addr` are covered by the worker-level
+     `base_gpu_id`, and `dist_init_addr` are covered by the runner-level
      test below because Python would otherwise reject the duplicate
      keyword before helper code can run.
    - **AR-only knob protection — factory level**: call
-     `create_image_encoder_executor(...,
+     `create_image_encoder_runner(...,
      server_args_overrides={"mem_fraction_static": 0.5})` and assert
-     the `ValueError` propagates from helper through worker
+     the `ValueError` propagates from helper through runner
      `**overrides` splat. This locks the dict-style entry point users
      actually configure through `StageConfig.factory_args`.
    - **Encoder TP source-of-truth protection — factory level**: call
-     `create_image_encoder_executor(...,
+     `create_image_encoder_runner(...,
      server_args_overrides={"tp_size": 2})` and assert the same
      source-of-truth `ValueError` propagates before
      `build_sglang_encoder_server_args(...)` is called. Repeat for
      `base_gpu_id`, `dist_init_addr`, `dtype`, `load_format`, and for
-     `create_audio_encoder_executor`. This catches the user-facing
+     `create_audio_encoder_runner`. This catches the user-facing
      config shape where a deployment tries to configure encoder TP or
      GPU placement through `server_args_overrides` instead of
      `StageConfig.tp_size` / `StageConfig.gpu`.
-2. Add `sglang_omni_v1/model_runner/sglang_encoder_worker.py`. Behind
-   `backend="sglang"` only — never the default in this PR. The worker
+2. Add `sglang_omni_v1/model_runner/sglang_encoder_runner.py`. Behind
+   `backend="sglang"` only — never the default in this PR. The runner
    builds `EncoderModuleContainer` from adapter-provided
    `EncoderModuleSpec`s and partial-loads matching checkpoint prefixes;
    it must not call `get_model()` on the full upstream
@@ -2645,8 +2675,8 @@ Phase 0 — landing path that doesn't break v1:
    audio), including the visual/audio `EncoderModuleSpec`s and tests that
    the image stage does not load `audio_tower`/LLM/talker weights and the
    audio stage does not load visual/LLM/talker weights.
-5. Update `create_image_encoder_executor()` and
-   `create_audio_encoder_executor()` to accept `backend`, `tp_rank`,
+5. Update `create_image_encoder_runner()` and
+   `create_audio_encoder_runner()` to accept `backend`, `tp_rank`,
    `tp_size`, `nccl_port`, `load_format`, `server_args_overrides`. Default
    `backend="local"` keeps current behaviour.
 6. Add a Qwen3-Omni config variant (`qwen3_omni_encoder_tp.py` or a CLI
@@ -2725,7 +2755,7 @@ Minimum lanes (unit + GPU + E2E):
     expected per-request `encoder_outs` dict shape.
   - `EncoderScheduler._recv_messages` mocks the TP groups and confirms
     that on the entry rank the metadata pickle does not contain tensor
-    payload bytes, while followers reconstruct identical
+    payload bytes, while non-entry ranks reconstruct identical
     `IncomingMessage` objects after `dist.broadcast`.
   - `EncoderModuleContainer.load_weights` filters checkpoint keys by
     `EncoderModuleSpec`: image stage accepts only visual prefixes, audio
@@ -2769,24 +2799,24 @@ Minimum lanes (unit + GPU + E2E):
 
 ## Open Questions
 
-1. **Upstream `EncoderModelWorker` / partial encoder loader helper.**
+1. **Upstream `EncoderModelRunner` / partial encoder loader helper.**
    Should we push the shared init + partial-load sequence
    (`set_global_server_args_for_scheduler` → `ModelConfig` → `LoadConfig`
    → `init_distributed_environment` → `initialize_model_parallel` →
    `initialize_dp_attention` → instantiate declared encoder submodules →
    load matching checkpoint prefixes → expose `tp_group`) into SGLang main
    as a public helper class? That would delete most of
-   `SGLangEncoderWorker.__init__` and remove the only place v1 reads into
+   `SGLangEncoderRunner.__init__` and remove the only place v1 reads into
    upstream `MMEncoder` / model-loader internals. The upstream helper should
    **not** call `get_model()` on the full `ForConditionalGeneration` class;
    it should be a first-class encoder-submodule loader. Recommended: land
    the local helper in Phase 0, then file an upstream issue after Phase 1
-   passes, propose `sglang.srt.disaggregation.EncoderModelWorker`, driven by
+   passes, propose `sglang.srt.disaggregation.EncoderModelRunner`, driven by
    SGLang-Omni as the first consumer.
 
    Note (Chencheng): This partial encoder loader should eventually be
    upstreamed to SGLang. For now, we keep it in SGLang-Omni to unblock
-   development and validation. Once the upstream `EncoderModelWorker` /
+   development and validation. Once the upstream `EncoderModelRunner` /
    partial encoder loader lands, Omni should replace the local helper with
    the upstream API.
 
@@ -2829,7 +2859,7 @@ Minimum lanes (unit + GPU + E2E):
    in Phase 2, after `tp_size>1` parity is locked.
 
 7. **Multinode encoder TP.** Phase 0 is single-node. `nnodes` and
-   `node_rank` sit in `_ENCODER_PROTECTED_KEYS` so the SGLang worker
+   `node_rank` sit in `_ENCODER_PROTECTED_KEYS` so the SGLang runner
    can never accidentally enter a multinode init path; the launcher
    only allocates one NCCL port per stage and assumes
    `127.0.0.1`-loopback dist-init addresses. Multinode encoder TP
@@ -2842,7 +2872,7 @@ Minimum lanes (unit + GPU + E2E):
 
 ## Progress Tracking
 
-- [ ] Phase 0 land — `EncoderScheduler` + `SGLangEncoderWorker` +
+- [ ] Phase 0 land — `EncoderScheduler` + `SGLangEncoderRunner` +
       Qwen3-Omni adapter, `backend="local"` default.
 - [ ] Phase 1 parity — image/audio encoder local-vs-sglang, tp1-vs-tp2.
 - [ ] Phase 2 — `backend="auto"` defaults to SGLang for Qwen3-Omni.
