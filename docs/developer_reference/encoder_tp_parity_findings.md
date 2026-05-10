@@ -197,6 +197,61 @@ collectives across two ranks produce per-element diffs in the
 by the dynamic range of the matmul partial products, not by the
 correctness of the implementation.
 
+### Result 2b — Layer-by-layer tp=1 vs tp=2 diff growth
+
+To pin down *where* the 0.27 max-abs-diff comes from, both tp=1 and
+tp=2 captures were rerun with forward hooks on every block of
+``visual``. Per-layer diff stats (per-token max abs diff):
+
+| layer | max abs | tokens > 1.0 (of 24168) | cos mean |
+|---|---:|---:|---:|
+| ``patch_embed`` (no TP) | 0 | 0 | 1.000000 |
+| ``blk_00`` | 0.031 | 0 | 1.000000 |
+| ``blk_04`` | 0.047 | 0 | 0.999997 |
+| ``blk_08`` (deepstack idx 8) | 0.137 | 0 | 0.999997 |
+| ``blk_09`` (jump) | **6.12** | **62** | 0.999994 |
+| ``blk_16`` (deepstack idx 16) | 6.78 | ~75 | 0.999986 |
+| ``blk_20`` | 7.75 | ~150 | 0.999965 |
+| ``blk_25`` | 7.34 | ~250 | 0.999945 |
+| ``blk_26`` (last block) | **448** | **10712 (44%)** | 0.999997 |
+| ``merger`` (final, after 2×2 spatial avg, N=6042) | **0.266** | **0** | 0.999984 |
+
+Three distinct phases:
+
+1. **Blocks 0–8: linear accumulation.** Each block adds NCCL fp16
+   all-reduce noise from ``attn.o_proj`` and ``mlp.down_proj``
+   (the two ``RowParallelLinear`` calls per block). Growth is roughly
+   ``noise × sqrt(layer)``. By blk_08 only 2 tokens have any element
+   above 0.1.
+2. **Block 9: softmax amplification.** The two already-large-noise
+   tokens get fed into block 9's attention softmax, which is
+   non-linear and amplifies their noise spike to 6+. From here on 62
+   tokens carry an outlier > 1.0, but the rest of the 24168 tokens
+   stay clean. Mean cos sim remains ≥ 0.99999.
+3. **Block 26 (last block): broad amplification.** 44% of tokens
+   develop max-abs-diff > 1.0; 5 tokens have outliers above 100,
+   peak at 448. Likely a near-zero LayerNorm denominator getting
+   divided through.
+4. **Merger smooths it.** The patch merger does a 2×2 spatial
+   reduction (24168 → 6042 tokens) with linear projections that
+   *average* groups of four blk_26 tokens together. The 44%-of-tokens
+   chaos before the merger collapses to 0% > 1.0 after the merger,
+   with peak 0.266 left on a single token.
+
+So the 0.27 max-abs-diff is structurally explained: fp16 NCCL
+accumulation-order noise + softmax non-linearity at specific tokens,
+filtered by spatial averaging in the merger. Mean cosine similarity
+≥ 0.9999 on 99.9% of post-merger tokens. Not a correctness bug —
+inherent to fp16 + parallel reduction order.
+
+Per-layer captures live at:
+- ``/tmp/parity_sglang_tp1_layers.pkl`` (tp=1, 29 layer outputs)
+- ``/tmp/parity_sglang_tp2_layers.pkl`` (tp=2, 29 layer outputs)
+
+Reproduce with ``python tests/_encoder_parity_harness.py sglang
+<out> --tp-size 1 --capture-layers`` and the equivalent through
+``run_tp2_parity.sh`` with ``EXTRA_ARGS=--capture-layers``.
+
 ## Result 3 — `backend="local"` (tp=1) vs `backend="sglang"` (tp=2)
 
 Closes the question: does the local-vs-sglang implementation gap

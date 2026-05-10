@@ -112,7 +112,7 @@ def _run_local(model_path: str, out_path: str) -> None:
         pickle.dump({"image_embeds": image_embeds, "deepstack": deepstack}, f)
 
 
-def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None) -> None:
+def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None, capture_layers: bool = False) -> None:
     from sglang_omni_v1.model_runner.sglang_encoder_runner import (
         SGLangEncoderRunner,
     )
@@ -132,6 +132,33 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
         dtype="float16",
     )
+
+    # Optional layer-output capture for tp1-vs-tp2 layer-by-layer
+    # parity. Hooks fire on the block boundary (after both
+    # attn.o_proj's all-reduce and mlp.down_proj's all-reduce), so
+    # the captured tensor is replicated across ranks. Output of
+    # patch_embed is independent of TP; output of merger is the
+    # final (N, base*(1+ndeepstack)) used to slice image_embeds +
+    # deepstack.
+    captures: dict[str, torch.Tensor] = {}
+    if capture_layers:
+        visual = runner.model.visual
+
+        def _grab(name: str):
+            def hook(_mod, _inp, out):
+                t = out[0] if isinstance(out, tuple) else out
+                if torch.is_tensor(t):
+                    captures[name] = t.detach().cpu()
+            return hook
+
+        if hasattr(visual, "patch_embed"):
+            visual.patch_embed.register_forward_hook(_grab("00_patch_embed"))
+        if hasattr(visual, "blocks"):
+            for i, blk in enumerate(visual.blocks):
+                blk.register_forward_hook(_grab(f"blk_{i:02d}"))
+        if hasattr(visual, "merger"):
+            visual.merger.register_forward_hook(_grab("99_merger"))
+
     hf_cfg = runner.model_config.hf_config
     adapter = Qwen3OmniImageEncoderAdapter(hf_config=hf_cfg, dtype=torch.float16)
     msg = IncomingMessage(
@@ -161,8 +188,11 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
     deepstack = state.get("deepstack_visual_embeds_image")
     if deepstack is not None:
         deepstack = [t.detach().cpu() for t in deepstack]
+    out_dict: dict[str, object] = {"image_embeds": image_embeds, "deepstack": deepstack}
+    if capture_layers:
+        out_dict["layers"] = captures
     with open(out_path, "wb") as f:
-        pickle.dump({"image_embeds": image_embeds, "deepstack": deepstack}, f)
+        pickle.dump(out_dict, f)
 
 
 def _run_bare_sglang(model_path: str, out_path: str) -> None:
@@ -264,6 +294,7 @@ def main() -> None:
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--tp-rank", type=int, default=0)
     parser.add_argument("--nccl-port", type=int, default=None)
+    parser.add_argument("--capture-layers", action="store_true")
     args = parser.parse_args()
 
     model_path = _resolve_model_path()
@@ -278,6 +309,7 @@ def main() -> None:
             tp_size=args.tp_size,
             tp_rank=args.tp_rank,
             nccl_port=args.nccl_port,
+            capture_layers=args.capture_layers,
         )
     print(
         f"PARITY_OK backend={args.backend} tp={args.tp_size} rank={args.tp_rank} "
