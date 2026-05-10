@@ -12,8 +12,8 @@ scheduler type. Adds an explicit two-channel broadcast in
    on cuda:0.
 
 A small ``all_gather_object`` "alloc-ok?" handshake between the two
-broadcasts prevents a follower OOM mid-allocation from leaving the
-entry rank stuck in ``dist.broadcast``.
+broadcasts prevents a non-entry-rank OOM mid-allocation from leaving
+the entry rank stuck in ``dist.broadcast``.
 
 The scheduler is correct in both lanes:
 
@@ -22,9 +22,15 @@ The scheduler is correct in both lanes:
   ``get_video_feature`` call ``.type(dtype)`` only — they do not move
   tensors to the model's device.
 - ``tp_size  > 1``: drain the inbox on the entry rank only; broadcast
-  inputs to followers; run the same ``build_batch`` /
+  inputs to non-entry ranks; run the same ``build_batch`` /
   ``encode_batch`` / ``slice_results`` pipeline on every rank;
   emit results from the entry rank only.
+
+Naming note: this module uses ``entry_rank`` / ``non-entry rank`` to
+describe the rank-0-vs-rest asymmetry. The asymmetry is just "who
+owns external IO" — there's no leader election or failover. The
+Stage-level ``single/leader/follower`` role split is a separate
+abstraction layer that this scheduler doesn't touch.
 
 See ``docs/developer_reference/encoder_tp_path_b_design.md`` for the
 load-bearing design notes.
@@ -48,7 +54,7 @@ from sglang_omni_v1.pipeline.relay_io import extract_tensors, restore_tensors
 from sglang_omni_v1.scheduling.messages import IncomingMessage, OutgoingMessage
 
 if TYPE_CHECKING:
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
     from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
         BatchPlan,
         EncoderAdapter,
@@ -69,7 +75,7 @@ class _TensorSpec:
 
     Carries the typed ``torch.dtype`` (not the stringified form
     ``relay_io.extract_tensors`` produces, which would force a parser on
-    the follower side).
+    the non-entry-rank side).
     """
     path: str
     shape: tuple[int, ...]
@@ -103,7 +109,7 @@ class EncoderScheduler:
 
     def __init__(
         self,
-        worker: "SGLangEncoderWorker",
+        runner: "SGLangEncoderRunner",
         adapter: "EncoderAdapter",
         *,
         max_batch_size: int = 32,
@@ -111,7 +117,7 @@ class EncoderScheduler:
         request_cost_fn: Callable[[Any], int] | None = None,
         max_batch_cost: int | None = None,
     ) -> None:
-        self.worker = worker
+        self.runner = runner
         self.adapter = adapter
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
@@ -161,7 +167,7 @@ class EncoderScheduler:
         while self._running:
             messages, recv_err = self._recv_messages()
             if self._gather_pre_forward_error(recv_err):
-                if self.worker.is_entry_rank:
+                if self.runner.is_entry_rank:
                     self._emit_error(
                         messages,
                         recv_err
@@ -180,7 +186,7 @@ class EncoderScheduler:
                 build_err = exc
 
             if self._gather_pre_forward_error(build_err):
-                if self.worker.is_entry_rank:
+                if self.runner.is_entry_rank:
                     self._emit_error(
                         messages,
                         build_err
@@ -190,7 +196,7 @@ class EncoderScheduler:
                 continue
 
             try:
-                raw = self.worker.encode_batch(plan)
+                raw = self.runner.encode_batch(plan)
             except Exception as exc:  # noqa: BLE001
                 # Production: _fatal_tp_forward_error calls os._exit(1)
                 # and never returns; the runner's _monitor_children
@@ -205,7 +211,7 @@ class EncoderScheduler:
                 self._running = False
                 return
 
-            if not self.worker.is_entry_rank:
+            if not self.runner.is_entry_rank:
                 continue
 
             try:
@@ -236,13 +242,13 @@ class EncoderScheduler:
         gather marshals only a picklable boolean — the exception object
         stays local, so each rank emits its own request-level error.
         """
-        if self.worker.tp_size <= 1:
+        if self.runner.tp_size <= 1:
             return local_err is not None
-        err_flags: list[bool] = [False] * self.worker.tp_size
+        err_flags: list[bool] = [False] * self.runner.tp_size
         dist.all_gather_object(
             err_flags,
             local_err is not None,
-            group=self.worker.tp_group.cpu_group,
+            group=self.runner.tp_group.cpu_group,
         )
         return any(err_flags)
 
@@ -261,7 +267,7 @@ class EncoderScheduler:
         """
         logger.exception(
             "Fatal TP encoder forward failure on rank %d/%d: %r",
-            self.worker.tp_rank, self.worker.tp_size, error,
+            self.runner.tp_rank, self.runner.tp_size, error,
         )
         os._exit(1)
 
@@ -365,7 +371,7 @@ class EncoderScheduler:
         list[list[torch.Tensor]],
         list[list[_TensorSpec]],
     ]:
-        """Extract tensors from each message, lift them to the worker device.
+        """Extract tensors from each message, lift them to the runner device.
 
         Returns three parallel lists indexed by message:
 
@@ -401,8 +407,8 @@ class EncoderScheduler:
             specs: list[_TensorSpec] = []
             lifted: dict[str, torch.Tensor] = {}
             for path, t in tensor_dict.items():
-                if t.device != self.worker.device:
-                    t = t.to(self.worker.device, non_blocking=True)
+                if t.device != self.runner.device:
+                    t = t.to(self.runner.device, non_blocking=True)
                 tensors.append(t)
                 specs.append(
                     _TensorSpec(path=path, shape=tuple(t.shape), dtype=t.dtype)
@@ -411,7 +417,7 @@ class EncoderScheduler:
 
             # Rebuild the entry rank's payload with GPU-resident tensors
             # so its downstream BatchPlan sees the same device-resident
-            # tensors the followers will reconstruct.
+            # tensors the non-entry ranks will reconstruct.
             payload_cls = type(payload)
             new_payload = payload_cls(
                 request_id=payload.request_id,
@@ -457,25 +463,25 @@ class EncoderScheduler:
 
     def _allocation_ready_gather(self, *, local_ok: bool) -> list[bool]:
         """Gather per-rank allocation-success flags on the TP CPU group."""
-        flags: list[bool] = [False] * self.worker.tp_size
+        flags: list[bool] = [False] * self.runner.tp_size
         dist.all_gather_object(
             flags,
             local_ok,
-            group=self.worker.tp_group.cpu_group,
+            group=self.runner.tp_group.cpu_group,
         )
         return flags
 
     def _recv_messages(
         self,
     ) -> tuple[list[IncomingMessage], BaseException | None]:
-        """Drain inbox and broadcast inputs to TP followers.
+        """Drain inbox and broadcast inputs to TP non-entry ranks.
 
         Never raises — returns ``(messages, error)``. The error is non-None
         if either rank failed during this iteration. Drained messages
         are returned even on entry-rank failure so the scheduler can emit
         request-level errors against them in the unified handshake.
         """
-        if self.worker.tp_size == 1:
+        if self.runner.tp_size == 1:
             local, collect_err = self._collect_batch_or_error()
             if collect_err is not None or not local:
                 return local, collect_err
@@ -489,10 +495,10 @@ class EncoderScheduler:
             # because _strip_and_lift restored them before returning.
             return meta_msgs, None
 
-        tp = self.worker.tp_group
+        tp = self.runner.tp_group
         src_rank = tp.ranks[0]
 
-        if self.worker.is_entry_rank:
+        if self.runner.is_entry_rank:
             local, collect_err = self._collect_batch_or_error()
             if collect_err is not None:
                 broadcast_pyobj(
@@ -551,7 +557,7 @@ class EncoderScheduler:
                         torch.empty(
                             spec.shape,
                             dtype=spec.dtype,
-                            device=self.worker.device,
+                            device=self.runner.device,
                         )
                         for spec in specs
                     ]

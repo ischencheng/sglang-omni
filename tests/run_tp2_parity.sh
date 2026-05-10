@@ -1,5 +1,5 @@
 #!/bin/bash
-# Drive 2 SGLangEncoderWorker ranks on GPUs 3 and 4, share one NCCL bootstrap port.
+# Drive 2 SGLangEncoderRunner ranks on GPUs 3 and 4, share one NCCL bootstrap port.
 set -e
 
 OUT_PATH="${1:?out_path}"

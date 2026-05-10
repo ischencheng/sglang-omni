@@ -23,7 +23,7 @@ _SGLANG_BACKENDS = frozenset({"sglang", "auto"})
 # ``factory_args`` at spawn time. Letting these flow through user
 # ``factory_args`` / ``runtime_overrides`` creates a silent desync: e.g.
 # ``StageConfig.tp_size=1`` + ``factory_args[tp_size]=2`` spawns one process
-# but boots SGLangEncoderWorker with ``world_size=2``, hanging NCCL bootstrap
+# but boots SGLangEncoderRunner with ``world_size=2``, hanging NCCL bootstrap
 # forever waiting for the missing rank 1.
 _TP_LAUNCH_PARAMS = frozenset({"tp_rank", "tp_size", "nccl_port"})
 

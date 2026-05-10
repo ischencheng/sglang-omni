@@ -88,7 +88,7 @@ def test_helper_forwards_loader_overrides():
 # Protected-key rejects (helper level — go through `**overrides`)
 # ---------------------------------------------------------------------------
 
-# AR-only knobs that have no meaning for an encoder-only worker.
+# AR-only knobs that have no meaning for an encoder-only runner.
 _AR_ONLY = [
     ("mem_fraction_static", 0.5),
     ("max_running_requests", 32),
@@ -100,9 +100,9 @@ _AR_ONLY = [
 # Parallelism / placement keys that pass through ``**overrides``.
 # (``tp_size``, ``base_gpu_id``, ``dist_init_addr`` are direct kwargs of
 # the helper; passing them again via `**overrides` is a Python-level
-# TypeError before our reject can fire — the worker's
+# TypeError before our reject can fire — the runner's
 # ``_WORKER_MANAGED_KEYS`` reject catches users who try this through the
-# worker's ``server_args_overrides`` dict.)
+# runner's ``server_args_overrides`` dict.)
 _PARALLELISM = [
     ("pp_size", 2),
     ("dp_size", 2),
@@ -170,13 +170,13 @@ def test_helper_rejects_encoder_fork_keys(key, value):
 
 
 # ---------------------------------------------------------------------------
-# Worker-level reject — protected keys reachable only through
-# ``server_args_overrides`` dict on the worker
+# Runner-level reject — protected keys reachable only through
+# ``server_args_overrides`` dict on the runner
 # ---------------------------------------------------------------------------
 
 
 def _stub_specs():
-    """Minimal valid spec list for worker validation tests."""
+    """Minimal valid spec list for runner validation tests."""
     from sglang_omni_v1.models.qwen3_omni.encoder_adapters import EncoderModuleSpec
     return (
         EncoderModuleSpec(
@@ -187,16 +187,16 @@ def _stub_specs():
     )
 
 
-def test_worker_rejects_worker_managed_keys_in_overrides_dict():
-    """SGLangEncoderWorker rejects worker-managed keys *before* the
+def test_runner_rejects_runner_managed_keys_in_overrides_dict():
+    """SGLangEncoderRunner rejects runner-managed keys *before* the
     helper-level **splat, otherwise Python raises a confusing
     "got multiple values" TypeError. Tested without actually
-    instantiating the worker (which would require a real model)."""
-    from sglang_omni_v1.model_runner import sglang_encoder_worker as sew
+    instantiating the runner (which would require a real model)."""
+    from sglang_omni_v1.model_runner import sglang_encoder_runner as sew
 
-    cls = sew.SGLangEncoderWorker
+    cls = sew.SGLangEncoderRunner
     inst = cls.__new__(cls)
-    with pytest.raises(ValueError, match="worker-managed keys"):
+    with pytest.raises(ValueError, match="runner-managed keys"):
         cls.__init__(
             inst,
             model_path="dummy/model",
@@ -209,12 +209,12 @@ def test_worker_rejects_worker_managed_keys_in_overrides_dict():
         )
 
 
-def test_worker_rejects_invalid_tp_rank():
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+def test_runner_rejects_invalid_tp_rank():
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
 
-    inst = SGLangEncoderWorker.__new__(SGLangEncoderWorker)
+    inst = SGLangEncoderRunner.__new__(SGLangEncoderRunner)
     with pytest.raises(ValueError, match="tp_rank"):
-        SGLangEncoderWorker.__init__(
+        SGLangEncoderRunner.__init__(
             inst,
             model_path="dummy/model",
             gpu_id=0,
@@ -225,12 +225,12 @@ def test_worker_rejects_invalid_tp_rank():
         )
 
 
-def test_worker_rejects_invalid_tp_size():
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+def test_runner_rejects_invalid_tp_size():
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
 
-    inst = SGLangEncoderWorker.__new__(SGLangEncoderWorker)
+    inst = SGLangEncoderRunner.__new__(SGLangEncoderRunner)
     with pytest.raises(ValueError, match="tp_size"):
-        SGLangEncoderWorker.__init__(
+        SGLangEncoderRunner.__init__(
             inst,
             model_path="dummy/model",
             gpu_id=0,
@@ -241,17 +241,17 @@ def test_worker_rejects_invalid_tp_size():
         )
 
 
-def test_worker_rejects_empty_encoder_specs():
-    """Locks the [Upstream Reuse Boundary] contract: the worker MUST
+def test_runner_rejects_empty_encoder_specs():
+    """Locks the [Upstream Reuse Boundary] contract: the runner MUST
     refuse to fall back to ``get_model()`` on the full
     ``ForConditionalGeneration`` class. An adapter without any
     ``encoder_specs`` is a misconfigured stage, not a "load
     everything" hint."""
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
 
-    inst = SGLangEncoderWorker.__new__(SGLangEncoderWorker)
+    inst = SGLangEncoderRunner.__new__(SGLangEncoderRunner)
     with pytest.raises(ValueError, match="encoder_specs"):
-        SGLangEncoderWorker.__init__(
+        SGLangEncoderRunner.__init__(
             inst,
             model_path="dummy/model",
             gpu_id=0,

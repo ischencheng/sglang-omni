@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal SGLang-native encoder worker with partial encoder loading.
+"""Minimal SGLang-native encoder runner with partial encoder loading.
 
 Owns SGLang's distributed init, encoder-only ``ServerArgs`` /
 ``ModelConfig`` / ``LoadConfig``, and a small ``EncoderModuleContainer``
 that holds *only* the upstream encoder submodules an adapter declared
-through its :class:`EncoderModuleSpec` list. The worker NEVER calls
+through its :class:`EncoderModuleSpec` list. The runner NEVER calls
 ``get_model()`` on the full upstream ``ForConditionalGeneration``
 class — for Qwen3-Omni that would instantiate the thinker LLM (~57 GB
 fp16) and the talker on every encoder GPU, which both wastes memory
 and OOMs on H100-class hardware.
 
-What the worker does inherit from upstream:
+What the runner inherits from upstream:
     - SGLang distributed init / TP groups
     - SGLang loader pipeline (``DefaultModelLoader._get_all_weights``,
       ``load_weights_and_postprocess``)
@@ -18,9 +18,16 @@ What the worker does inherit from upstream:
       (``ColumnParallelLinear`` / ``RowParallelLinear``, fused
       attention, etc.)
 
-What the worker brings:
+What the runner brings:
     - The :class:`EncoderModuleContainer` with adapter-supplied
       submodules and a prefix-filtering ``load_weights``.
+
+Naming note: this module deliberately uses ``entry_rank`` /
+``non_entry_rank`` for the rank-0-vs-rest asymmetry rather than
+``leader`` / ``follower``. The asymmetry here is just "who owns
+external IO" — there's no leader election, no failover, no consensus
+machinery. The Stage-level ``single/leader/follower`` role split
+elsewhere in v1 is unrelated and not touched.
 
 See ``docs/developer_reference/encoder_tp_path_b_design.md`` →
 "Upstream Reuse Boundary" / "EncoderModuleSpec".
@@ -59,11 +66,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Worker-managed kwargs that the helper consumes as direct keyword args.
+# Runner-managed kwargs that the helper consumes as direct keyword args.
 # Reject these in `server_args_overrides` BEFORE the **splat — otherwise
 # Python raises TypeError "got multiple values for keyword argument" before
 # the helper's protected-key reject can fire.
-_WORKER_MANAGED_KEYS = frozenset({
+_RUNNER_MANAGED_KEYS = frozenset({
     "model_path", "tp_size", "base_gpu_id", "dist_init_addr",
     "dtype", "load_format",
 })
@@ -246,29 +253,29 @@ class EncoderModuleContainer(nn.Module):
         return None
 
 
-class SGLangEncoderWorker:
+class SGLangEncoderRunner:
     """SGLang-native encoder model wrapper with partial loading.
 
-    The worker process is invoked by ``MultiProcessPipelineRunner``,
+    The runner process is invoked by ``MultiProcessPipelineRunner``,
     which has remapped ``CUDA_VISIBLE_DEVICES`` to a single physical GPU
     before importing torch (see ``encoder_tp_path_b_design.md`` "GPU
     placement"). Therefore ``cuda:0`` is the only visible device in this
     process, regardless of ``tp_size`` and the configured physical
-    ``gpu``. The worker pins ``cuda_device=0`` and forwards
+    ``gpu``. The runner pins ``cuda_device=0`` and forwards
     ``dist_local_rank=tp_rank`` so SGLang's local-master / shard-index
     callsites observe a unique ``[0, world_size)`` rank.
 
     Args:
         model_path: HF model id or local checkpoint path.
         gpu_id: Physical GPU id (informational; the launcher remap means
-            the worker actually sees this as ``cuda:0``).
+            the runner actually sees this as ``cuda:0``).
         tp_rank: TP rank in ``[0, tp_size)``.
         tp_size: TP world size.
         nccl_port: Loopback NCCL bootstrap port allocated by the runner.
-            Optional; the worker picks a free port when unset
+            Optional; the runner picks a free port when unset
             (single-rank case).
         encoder_specs: Adapter-supplied list of encoder submodules to
-            load. Required — the worker does NOT load the full
+            load. Required — the runner does NOT load the full
             ``ForConditionalGeneration`` class.
         dtype: Optional dtype override forwarded to ``ServerArgs``.
         load_format: Optional load-format override forwarded to ``ServerArgs``.
@@ -297,8 +304,8 @@ class SGLangEncoderWorker:
             )
         if not encoder_specs:
             raise ValueError(
-                "SGLangEncoderWorker requires encoder_specs; the adapter must "
-                "declare its upstream submodules. The worker no longer falls "
+                "SGLangEncoderRunner requires encoder_specs; the adapter must "
+                "declare its upstream submodules. The runner no longer falls "
                 "back to get_model() on the full ForConditionalGeneration "
                 "class — that would load the LLM/talker on every encoder GPU."
             )
@@ -307,7 +314,7 @@ class SGLangEncoderWorker:
         self.tp_size = int(tp_size)
         self.is_entry_rank = self.tp_rank == 0
 
-        # Forwarded for telemetry / debugging only — the worker hard-pins
+        # Forwarded for telemetry / debugging only — the runner hard-pins
         # cuda_device=0 because the launcher remap leaves only one device
         # visible.
         self.physical_gpu_id = int(gpu_id)
@@ -323,10 +330,10 @@ class SGLangEncoderWorker:
         self.device = torch.device(f"cuda:{cuda_device}")
 
         overrides = dict(server_args_overrides or {})
-        clobbered = sorted(_WORKER_MANAGED_KEYS & overrides.keys())
+        clobbered = sorted(_RUNNER_MANAGED_KEYS & overrides.keys())
         if clobbered:
             raise ValueError(
-                f"server_args_overrides cannot set worker-managed keys "
+                f"server_args_overrides cannot set runner-managed keys "
                 f"{clobbered}. These are derived from StageConfig and "
                 f"factory parameters; pass them through StageConfig "
                 f"(model_path, tp_size, gpu, dtype, load_format) instead."
@@ -389,7 +396,7 @@ class SGLangEncoderWorker:
         self.model.eval()
 
         logger.info(
-            "SGLangEncoderWorker ready (tp_rank=%d/%d, physical_gpu=%d, "
+            "SGLangEncoderRunner ready (tp_rank=%d/%d, physical_gpu=%d, "
             "model=%s, submodules=%s, dist_addr=%s)",
             self.tp_rank, self.tp_size, self.physical_gpu_id,
             model_path, [s.name for s in encoder_specs], dist_addr,

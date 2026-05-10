@@ -17,7 +17,7 @@ The encoders run with ``tp_size=2`` each on dedicated GPU pairs; the
 thinker, talker, and code2wav stages keep their existing single-GPU
 placement. ``backend="auto"`` would resolve to ``"local"`` in Phase 0
 (see RFC Phase 2 for the flip); this script picks ``"sglang"``
-explicitly so the SGLang encoder worker takes over right now.
+explicitly so the SGLang encoder runner takes over right now.
 """
 from __future__ import annotations
 

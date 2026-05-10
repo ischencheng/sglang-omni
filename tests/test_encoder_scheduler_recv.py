@@ -8,7 +8,7 @@ the per-iteration error boundary, and the request-level error
 emission against drained messages.
 
 The TP-multi-rank lanes (broadcast_pyobj, dist.broadcast,
-allocation-ready gather) are mocked: we feed a fake ``worker.tp_group``
+allocation-ready gather) are mocked: we feed a fake ``runner.tp_group``
 and a stand-in ``broadcast_pyobj`` / ``dist.all_gather_object`` /
 ``dist.broadcast`` so we can drive both the leader and follower paths
 deterministically without a multi-process distributed context.

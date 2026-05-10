@@ -12,7 +12,7 @@ For each encoder stage there is one adapter implementing
 - ``run_feature`` calls the loaded upstream encoder submodule directly
   — ``Qwen3OmniMoeVisionEncoder`` for image/video, ``Qwen3OmniMoeAudioEncoder``
   for audio — instead of the full ``thinker.get_*_feature`` entry
-  points. The encoder worker partial-loads ONLY these submodules (see
+  points. The encoder runner partial-loads ONLY these submodules (see
   ``EncoderModuleSpec``), so ``model.thinker`` is never instantiated and
   the full Qwen3-Omni LLM weights never reach the encoder GPU.
   Empty plans short-circuit and never call any submodule.
@@ -67,7 +67,7 @@ QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER = 5
 # ---------------------------------------------------------------------------
 # EncoderModuleSpec — declares which upstream encoder submodules a stage
 # loads and which checkpoint prefixes feed them. The shared SGLang encoder
-# worker uses these specs to partial-load only the relevant submodule
+# runner uses these specs to partial-load only the relevant submodule
 # weights, avoiding the ~57 GB of LLM/talker weights that
 # ``Qwen3OmniMoeForConditionalGeneration`` would otherwise pull in.
 # See ``docs/developer_reference/encoder_tp_path_b_design.md`` →
@@ -77,7 +77,7 @@ QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER = 5
 
 @dataclasses.dataclass(frozen=True)
 class EncoderModuleSpec:
-    """Declaration of an upstream encoder submodule the worker should load.
+    """Declaration of an upstream encoder submodule the runner should load.
 
     Args:
         name: Local attribute name the submodule will be exposed as on
@@ -354,9 +354,9 @@ class Qwen3OmniImageEncoderAdapter:
     """Adapter for the visual stage (images and videos)."""
 
     stage_name = IMAGE_STAGE
-    # Declares the upstream submodules the encoder worker must
+    # Declares the upstream submodules the encoder runner must
     # partial-load. The factory passes this through to
-    # ``SGLangEncoderWorker`` so only ``Qwen3OmniMoeVisionEncoder``
+    # ``SGLangEncoderRunner`` so only ``Qwen3OmniMoeVisionEncoder``
     # weights end up on the encoder GPU — the LLM, talker, and audio
     # tower are never instantiated.
     encoder_specs: tuple[EncoderModuleSpec, ...] = (QWEN3_OMNI_VISUAL_SPEC,)
@@ -473,7 +473,7 @@ class Qwen3OmniImageEncoderAdapter:
     ) -> dict[str, torch.Tensor | None]:
         if plan.is_empty:
             return {"image": None, "video": None, "audio": None}
-        # ``model`` is the EncoderModuleContainer the worker built from
+        # ``model`` is the EncoderModuleContainer the runner built from
         # ``self.encoder_specs``; it exposes the visual submodule under the
         # name declared in QWEN3_OMNI_VISUAL_SPEC (``visual``). We mirror
         # the simple no-chunking path of upstream

@@ -113,8 +113,8 @@ def _run_local(model_path: str, out_path: str) -> None:
 
 
 def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None) -> None:
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import (
-        SGLangEncoderWorker,
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import (
+        SGLangEncoderRunner,
     )
     from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
         Qwen3OmniImageEncoderAdapter,
@@ -123,7 +123,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
     from sglang_omni_v1.scheduling.messages import IncomingMessage
 
     pixel, grid = _build_real_image_inputs(model_path)
-    worker = SGLangEncoderWorker(
+    runner = SGLangEncoderRunner(
         model_path=model_path,
         gpu_id=0,
         tp_rank=tp_rank,
@@ -131,7 +131,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         nccl_port=nccl_port,
         dtype="float16",
     )
-    hf_cfg = worker.model_config.hf_config
+    hf_cfg = runner.model_config.hf_config
     adapter = Qwen3OmniImageEncoderAdapter(hf_config=hf_cfg, dtype=torch.float16)
     msg = IncomingMessage(
         request_id="r0",
@@ -150,7 +150,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         ),
     )
     plan = adapter.build_batch([msg])
-    raw = worker.encode_batch(plan)
+    raw = runner.encode_batch(plan)
     # Only rank 0 writes (the result is the same across ranks because of TP-symmetric outputs).
     if tp_rank != 0:
         return

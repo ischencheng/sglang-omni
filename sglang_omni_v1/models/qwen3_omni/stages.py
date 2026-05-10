@@ -833,8 +833,8 @@ def _build_sglang_encoder_scheduler(
     dtype: str | None,
     load_format: str | None,
 ):
-    """Build the SGLang encoder worker + EncoderScheduler for a stage."""
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import SGLangEncoderWorker
+    """Build the SGLang encoder runner + EncoderScheduler for a stage."""
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
     from sglang_omni_v1.models.qwen3_omni.components.common import (
         load_thinker_config,
     )
@@ -845,7 +845,7 @@ def _build_sglang_encoder_scheduler(
     from sglang_omni_v1.scheduling.encoder_scheduler import EncoderScheduler
 
     # Build the adapter FIRST so we can read its declared
-    # ``encoder_specs`` and pass them to the worker. The worker no
+    # ``encoder_specs`` and pass them to the runner. The runner no
     # longer falls back to ``get_model()`` on the full upstream
     # ForConditionalGeneration class — it requires the adapter's
     # spec list to know which submodules to load.
@@ -861,7 +861,7 @@ def _build_sglang_encoder_scheduler(
             hf_config=hf_thinker_config, dtype=torch_dtype
         )
 
-    worker = SGLangEncoderWorker(
+    runner = SGLangEncoderRunner(
         model_path=model_path,
         gpu_id=gpu_id,
         tp_rank=tp_rank,
@@ -874,7 +874,7 @@ def _build_sglang_encoder_scheduler(
     )
 
     return EncoderScheduler(
-        worker=worker,
+        runner=runner,
         adapter=adapter,
         max_batch_size=max_batch_size,
         max_batch_wait_ms=max_batch_wait_ms,
@@ -883,7 +883,7 @@ def _build_sglang_encoder_scheduler(
     )
 
 
-def create_image_encoder_executor(
+def create_image_encoder_runner(
     model_path: str,
     *,
     backend: Literal["local", "sglang", "auto"] = "local",
@@ -935,7 +935,7 @@ def create_image_encoder_executor(
     return _build_local_image_encoder(model_path, device=device, dtype=dtype)
 
 
-def create_audio_encoder_executor(
+def create_audio_encoder_runner(
     model_path: str,
     *,
     backend: Literal["local", "sglang", "auto"] = "local",
@@ -951,7 +951,7 @@ def create_audio_encoder_executor(
     activation_budget_bytes: int | None = None,
     server_args_overrides: dict[str, Any] | None = None,
 ):
-    """Build the audio-encoder stage scheduler. See ``create_image_encoder_executor``."""
+    """Build the audio-encoder stage scheduler. See ``create_image_encoder_runner``."""
     chosen = _resolve_backend(backend, model_path, stage="audio_encoder")
     if chosen == "sglang":
         return _build_sglang_encoder_scheduler(

@@ -109,7 +109,7 @@ def test_loop_forward_failure_is_fatal_even_at_tp_size_1():
     Under RFC v2, ``encode_batch`` failures cannot recover with a CPU
     gather because peers may be in NCCL. The contract holds at
     ``tp_size=1`` too — uniformity of the rule matters more than the
-    short-circuit, and a tp_size=1 worker is still inside upstream
+    short-circuit, and a tp_size=1 runner is still inside upstream
     parallel-layer code paths.
 
     We monkey-patch ``_fatal_tp_forward_error`` so the test process
@@ -240,7 +240,7 @@ def test_loop_pre_forward_build_error_recovery():
 
 
 class _CrashingForwardWorker:
-    """Worker whose encode_batch raises — must trigger the fatal path."""
+    """Runner whose encode_batch raises — must trigger the fatal path."""
     def __init__(self):
         self.tp_size = 1
         self.tp_rank = 0

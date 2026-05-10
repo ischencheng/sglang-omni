@@ -373,16 +373,16 @@ def test_real_factory_signature_lock_image_encoder():
     Bumping it to "auto" / "sglang" would silently desync launcher
     (sees "local") from factory body. See [Backend resolution contract].
     """
-    from sglang_omni_v1.models.qwen3_omni.stages import create_image_encoder_executor
+    from sglang_omni_v1.models.qwen3_omni.stages import create_image_encoder_runner
 
-    sig = inspect.signature(create_image_encoder_executor)
+    sig = inspect.signature(create_image_encoder_runner)
     assert sig.parameters["backend"].default == "local"
 
 
 def test_real_factory_signature_lock_audio_encoder():
-    from sglang_omni_v1.models.qwen3_omni.stages import create_audio_encoder_executor
+    from sglang_omni_v1.models.qwen3_omni.stages import create_audio_encoder_runner
 
-    sig = inspect.signature(create_audio_encoder_executor)
+    sig = inspect.signature(create_audio_encoder_runner)
     assert sig.parameters["backend"].default == "local"
 
 
@@ -403,7 +403,7 @@ def test_resolve_factory_args_rejects_tp_launch_params_in_factory_args(key, valu
     ``StageConfig.tp_size`` is the only public way to set TP size.
     Letting ``factory_args[tp_size]=N`` slip through while
     ``StageConfig.tp_size`` says 1 (or vice versa) silently desyncs
-    the runner's spawn count from the worker's NCCL world size,
+    the runner's spawn count from the runner's NCCL world size,
     hanging bootstrap. ``_resolve_factory_args`` must reject these
     keys with a clear error before any spec is built.
     """

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GPU parity tests for SGLang encoder worker (Phase 1).
+"""GPU parity tests for SGLang encoder runner (Phase 1).
 
 These tests are gated on:
 
@@ -74,26 +74,26 @@ if _MODEL_PATH is None:
 
 
 # ---------------------------------------------------------------------------
-# Worker init lane (tp_size=1)
+# Runner init lane (tp_size=1)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def sglang_image_worker_tp1():
-    """Build a single-rank SGLang encoder worker on cuda:0.
+def sglang_image_runner_tp1():
+    """Build a single-rank SGLang encoder runner on cuda:0.
 
     Loads ONLY the visual encoder submodule (not the full thinker /
     talker), per the partial-load contract. Footprint should be ~1-2
     GB instead of ~57 GB for the full Qwen3-Omni-30B model.
     """
-    from sglang_omni_v1.model_runner.sglang_encoder_worker import (
-        SGLangEncoderWorker,
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import (
+        SGLangEncoderRunner,
     )
     from sglang_omni_v1.models.qwen3_omni.encoder_adapters import (
         Qwen3OmniImageEncoderAdapter,
     )
 
-    worker = SGLangEncoderWorker(
+    runner = SGLangEncoderRunner(
         model_path=_MODEL_PATH,
         gpu_id=0,
         tp_rank=0,
@@ -102,28 +102,28 @@ def sglang_image_worker_tp1():
         encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
         dtype="float16",
     )
-    yield worker
+    yield runner
 
 
-def test_sglang_worker_pin_cuda_zero_at_tp_size_1(sglang_image_worker_tp1):
-    worker = sglang_image_worker_tp1
+def test_sglang_runner_pin_cuda_zero_at_tp_size_1(sglang_image_runner_tp1):
+    runner = sglang_image_runner_tp1
     # The launcher remap pins us to one visible GPU as cuda:0.
-    assert worker.device == torch.device("cuda:0")
+    assert runner.device == torch.device("cuda:0")
     # The visual submodule (and its params) lives on cuda:0.
-    p = next(worker.model.parameters())
+    p = next(runner.model.parameters())
     assert p.device.index == 0
 
 
-def test_partial_load_visual_only_no_thinker_no_talker(sglang_image_worker_tp1):
+def test_partial_load_visual_only_no_thinker_no_talker(sglang_image_runner_tp1):
     """Locks the partial-load contract.
 
     The container must hold ONLY the visual submodule. Any
-    LLM/talker/audio module on an image-stage worker means we
+    LLM/talker/audio module on an image-stage runner means we
     silently re-introduced the full-model load that the partial loader
     was built to avoid.
     """
-    worker = sglang_image_worker_tp1
-    children = dict(worker.model.named_children())
+    runner = sglang_image_runner_tp1
+    children = dict(runner.model.named_children())
     assert set(children) == {"visual"}, (
         f"image-stage container should hold only 'visual', got {sorted(children)}"
     )
@@ -131,7 +131,7 @@ def test_partial_load_visual_only_no_thinker_no_talker(sglang_image_worker_tp1):
     # The visual submodule itself should not contain any sub-attribute
     # that looks like a language-model layer or talker block.
     forbidden = {"thinker", "talker", "audio_tower", "lm_head", "embed_tokens"}
-    for name, _ in worker.model.named_modules():
+    for name, _ in runner.model.named_modules():
         for f in forbidden:
             assert f not in name.split("."), (
                 f"image-stage container leaked module {name!r}, "
@@ -139,16 +139,16 @@ def test_partial_load_visual_only_no_thinker_no_talker(sglang_image_worker_tp1):
             )
 
 
-def test_partial_load_visual_footprint_under_5gb(sglang_image_worker_tp1):
+def test_partial_load_visual_footprint_under_5gb(sglang_image_runner_tp1):
     """The visual encoder alone should fit comfortably in <5 GB on
     fp16. Pre-partial-load we'd see ~57 GB here from the full
     Qwen3-Omni-30B thinker. Use a generous bound so the test isn't
     flaky on minor revisions; the regression we care about (loading
     the full thinker) blows past 5 GB by an order of magnitude.
     """
-    worker = sglang_image_worker_tp1
+    runner = sglang_image_runner_tp1
     total_bytes = sum(
-        p.numel() * p.element_size() for p in worker.model.parameters()
+        p.numel() * p.element_size() for p in runner.model.parameters()
     )
     total_gb = total_bytes / (1024 ** 3)
     assert total_gb < 5.0, (
@@ -157,7 +157,7 @@ def test_partial_load_visual_footprint_under_5gb(sglang_image_worker_tp1):
     )
 
 
-def test_sglang_worker_world_group_local_rank_zero(sglang_image_worker_tp1):
+def test_sglang_runner_world_group_local_rank_zero(sglang_image_runner_tp1):
     """Locks "GPU placement across tp_size=1 and tp_size>1 lanes".
 
     At ``tp_size=1`` the local-master / shard-index slot must be 0, not
@@ -168,7 +168,7 @@ def test_sglang_worker_world_group_local_rank_zero(sglang_image_worker_tp1):
     assert get_world_group().local_rank == 0
 
 
-def test_sglang_worker_tp_size_one_initializes_distributed(sglang_image_worker_tp1):
+def test_sglang_runner_tp_size_one_initializes_distributed(sglang_image_runner_tp1):
     """``init_distributed_environment`` runs even at tp_size=1 — locks
     the [Distributed init is unconditional] section of the RFC."""
     import torch.distributed as dist
@@ -178,7 +178,7 @@ def test_sglang_worker_tp_size_one_initializes_distributed(sglang_image_worker_t
     assert dist.get_world_size() == 1
 
 
-def test_sglang_worker_tp_group_is_resolvable(sglang_image_worker_tp1):
+def test_sglang_runner_tp_group_is_resolvable(sglang_image_runner_tp1):
     """``get_tp_group()`` must resolve, otherwise ColumnParallelLinear /
     RowParallelLinear in the upstream encoder modules would have crashed
     at __init__ time."""
@@ -196,14 +196,14 @@ def test_sglang_worker_tp_group_is_resolvable(sglang_image_worker_tp1):
 
 
 @pytest.fixture(scope="module")
-def synthetic_image_inputs(sglang_image_worker_tp1):
+def synthetic_image_inputs(sglang_image_runner_tp1):
     """A tiny synthetic image in the format the preprocessor would emit.
 
     Patches: 1×4×4 = 16 patches; each patch dim is read from the
     model's vision config (``in_channels × temporal_patch_size ×
     patch_size × patch_size``).
     """
-    vc = sglang_image_worker_tp1.model_config.hf_config.thinker_config.vision_config
+    vc = sglang_image_runner_tp1.model_config.hf_config.thinker_config.vision_config
     in_ch = int(vc.in_channels)
     tps = int(vc.temporal_patch_size)
     ps = int(vc.patch_size)
@@ -217,7 +217,7 @@ def synthetic_image_inputs(sglang_image_worker_tp1):
 
 @pytest.mark.slow
 def test_image_encoder_local_vs_sglang_tp1_parity(
-    sglang_image_worker_tp1, synthetic_image_inputs
+    sglang_image_runner_tp1, synthetic_image_inputs
 ):
     """Verify backend=local and backend=sglang produce equivalent embeddings.
 
@@ -234,8 +234,8 @@ def test_image_encoder_local_vs_sglang_tp1_parity(
     from sglang_omni_v1.proto import StagePayload
     from sglang_omni_v1.scheduling.messages import IncomingMessage
 
-    worker = sglang_image_worker_tp1
-    hf_cfg = worker.model_config.hf_config
+    runner = sglang_image_runner_tp1
+    hf_cfg = runner.model_config.hf_config
     adapter = Qwen3OmniImageEncoderAdapter(
         hf_config=hf_cfg, dtype=torch.float16
     )
@@ -259,7 +259,7 @@ def test_image_encoder_local_vs_sglang_tp1_parity(
         ),
     )
     plan = adapter.build_batch([msg])
-    raw = worker.encode_batch(plan)
+    raw = runner.encode_batch(plan)
 
     sglang_image = raw["image"]
     assert sglang_image is not None

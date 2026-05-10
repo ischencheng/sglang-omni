@@ -36,7 +36,7 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="image_encoder",
-            factory=f"{_PKG}.stages.create_image_encoder_executor",
+            factory=f"{_PKG}.stages.create_image_encoder_runner",
             factory_args={"device": "cuda", "dtype": None},
             gpu=0,
             next="mm_aggregate",
@@ -48,7 +48,7 @@ class Qwen3OmniPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="audio_encoder",
-            factory=f"{_PKG}.stages.create_audio_encoder_executor",
+            factory=f"{_PKG}.stages.create_audio_encoder_runner",
             factory_args={"device": "cuda", "dtype": None},
             gpu=0,
             next="mm_aggregate",
@@ -106,7 +106,7 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="image_encoder",
-            factory=f"{_PKG}.stages.create_image_encoder_executor",
+            factory=f"{_PKG}.stages.create_image_encoder_runner",
             factory_args={"device": "cuda", "dtype": None},
             gpu=0,
             next="mm_aggregate",
@@ -118,7 +118,7 @@ class Qwen3OmniSpeechPipelineConfig(PipelineConfig):
         ),
         StageConfig(
             name="audio_encoder",
-            factory=f"{_PKG}.stages.create_audio_encoder_executor",
+            factory=f"{_PKG}.stages.create_audio_encoder_runner",
             factory_args={"device": "cuda", "dtype": None},
             gpu=0,
             next="mm_aggregate",

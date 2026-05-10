@@ -2,7 +2,7 @@
 """Unit tests for ``EncoderModuleSpec`` + ``EncoderModuleContainer``.
 
 The container is the load-bearing piece that prevents the encoder
-worker from loading LLM / talker / unrelated-encoder weights onto an
+runner from loading LLM / talker / unrelated-encoder weights onto an
 encoder GPU. These tests exercise:
 
 - Spec validation (unique names, non-empty list).
@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from sglang_omni_v1.model_runner.sglang_encoder_worker import EncoderModuleContainer
+from sglang_omni_v1.model_runner.sglang_encoder_runner import EncoderModuleContainer
 from sglang_omni_v1.models.qwen3_omni.encoder_adapters import EncoderModuleSpec
 
 
