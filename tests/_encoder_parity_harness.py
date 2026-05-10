@@ -129,6 +129,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         tp_rank=tp_rank,
         tp_size=tp_size,
         nccl_port=nccl_port,
+        encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
         dtype="float16",
     )
     hf_cfg = runner.model_config.hf_config

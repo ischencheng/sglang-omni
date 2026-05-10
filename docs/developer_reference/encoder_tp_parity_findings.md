@@ -6,8 +6,25 @@ local backend, and (b) itself at higher TP, on a real image input
 through the Qwen3-Omni-30B-A3B-Instruct checkpoint.
 
 The RFC Phase 1 spec calls for `atol=1e-3, rtol=1e-3` on fp16. The
-results below show what the two implementations actually produce; both
-checks fail the strict RFC tolerance, with very different magnitude.
+results below show what the two implementations actually produce; all
+three lanes fail the strict RFC tolerance, with very different
+magnitude. The third lane (local vs sglang at TP=2) closes the gap
+the original v1 of this doc left open: does the implementation
+divergence change once TP kicks in?
+
+## Quick reference
+
+| Comparison | Max abs | Mean abs | Mean per-token cos sim | RFC `atol=1e-3, rtol=1e-3` |
+|---|---:|---:|---:|:-:|
+| local (tp=1) vs sglang (tp=1) | 5.952 | 0.0216 | 0.9877 | ❌ |
+| local (tp=1) vs sglang (tp=2) | 5.949 | 0.0217 | 0.9877 | ❌ |
+| sglang (tp=1) vs sglang (tp=2) | 0.266 | 0.00082 | 0.999984 | ❌ (one outlier) |
+
+The local-vs-sglang gap (rows 1 and 2) is statistically identical at
+TP=1 and TP=2. Adding encoder TP contributes only the small NCCL
+fp16 accumulation-order noise visible in row 3; the dominant ~5.95
+divergence is the HF-transformers vs SGLang reimplementation gap and
+is independent of TP.
 
 ## Reproducer
 
@@ -18,16 +35,19 @@ CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
 
 # 2. Capture sglang-backend output at tp_size=1
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
-  python tests/_encoder_parity_harness.py sglang /tmp/parity_sglang.pkl
+  python tests/_encoder_parity_harness.py sglang /tmp/parity_sglang_tp1.pkl
 
 # 3. Capture sglang-backend output at tp_size=2 (uses the helper which
 #    spawns rank 1 in the background and rank 0 in the foreground;
-#    rank 0 writes the pickle).
-bash tests/run_tp2_parity.sh /tmp/parity_tp2.pkl 29701
+#    rank 0 writes the pickle). RANK0_GPU / RANK1_GPU env vars choose
+#    the physical GPUs; both must be free.
+RANK0_GPU=2 RANK1_GPU=3 \
+  bash tests/run_tp2_parity.sh /tmp/parity_sglang_tp2.pkl 29701
 
-# 4. Compare
-python tests/parity_compare.py /tmp/parity_local.pkl /tmp/parity_sglang.pkl
-python tests/parity_compare.py /tmp/parity_sglang.pkl /tmp/parity_tp2.pkl
+# 4. Compare each lane
+python tests/parity_compare.py /tmp/parity_local.pkl       /tmp/parity_sglang_tp1.pkl
+python tests/parity_compare.py /tmp/parity_local.pkl       /tmp/parity_sglang_tp2.pkl  # user-flagged lane
+python tests/parity_compare.py /tmp/parity_sglang_tp1.pkl  /tmp/parity_sglang_tp2.pkl
 ```
 
 Each subprocess loads exactly one Qwen3-Omni instance, so the same GPU
@@ -146,16 +166,67 @@ Deepstack layers (3 of them) are similarly tight: max abs diff 0.018,
 
 ### Interpretation
 
-TP1 vs TP2 outputs are effectively identical: 97.5% of tokens have
-cosine similarity ≥ 0.9999, mean 0.999984. The single 0.27 outlier in
-abs-diff is consistent with NCCL fp16 all-reduce accumulation-order
-noise, not a structural correctness issue.
+TP1 vs TP2 outputs are effectively identical: 99.9% of tokens have
+cosine similarity ≥ 0.999 (97.5% ≥ 0.9999), mean 0.999984. The single
+0.27 outlier in abs-diff is consistent with NCCL fp16 all-reduce
+accumulation-order noise, not a structural correctness issue.
 
 The strict RFC `atol=1e-3` fails on one element. Realistic fp16 NCCL
 collectives across two ranks produce per-element diffs in the
 `[1e-3, 5e-1]` band depending on the activation magnitude — bounded
 by the dynamic range of the matmul partial products, not by the
 correctness of the implementation.
+
+## Result 3 — `backend="local"` (tp=1) vs `backend="sglang"` (tp=2)
+
+Closes the question: does the local-vs-sglang implementation gap
+grow once TP kicks in?
+
+| Statistic | local (tp=1) | sglang (tp=2) |
+| --- | --- | --- |
+| `image_embeds` shape | `(6042, 2048)` | `(6042, 2048)` |
+| dtype | float16 | float16 |
+| mean | 0.0041 | 0.0040 |
+| std | 0.3294 | 0.3296 |
+
+Per-element diff:
+- max abs diff: **5.95** (vs 5.95 at tp=1 — unchanged)
+- mean abs diff: **0.0217** (vs 0.0216 at tp=1 — unchanged)
+- mean per-token cos sim: **0.987689** (vs 0.987709 at tp=1 — unchanged)
+
+Per-token cosine similarity distribution:
+
+| Cosine sim band | Tokens | % |
+| --- | ---: | ---: |
+| `[0.000, 0.500)` | 6 | 0.1 |
+| `[0.500, 0.900)` | 197 | 3.3 |
+| `[0.900, 0.990)` | 766 | 12.7 |
+| `[0.990, 0.999)` | 2044 | 33.8 |
+| `[0.999, 1.000)` | 3029 | 50.1 |
+
+The distribution is bit-equivalent to the local-vs-sglang-tp1 case
+(within 0.1% per bucket). NCCL's fp16 noise (~0.27 max abs from
+Result 2) is much smaller than the implementation gap (~5.95 max
+abs from Result 1), so it's invisible in this top-level comparison.
+This means **production semantics at TP>=2 are no further from
+the legacy local path than at TP=1** — equivalent, not worse.
+
+### End-to-end at TP=2
+
+Functional verification on the same checkpoint, image_encoder TP=2
+on GPUs 0+1, audio_encoder TP=1 on GPU 2, thinker on GPU 3:
+
+| Probe | Output | Verdict |
+|---|---|:-:|
+| `tp2_image_count_cars` (TP=2 visual encoder) | `"4cars"` | ✅ correct count |
+| `tp2_audio_image_answers_count` | full per-quadrant breakdown of all 4 vehicles | ✅ both paths feed thinker |
+| `tp2_video_draw_with_tool` (TP=2 visual on video frames) | `"drawing a guitar on a tablet with a stylus."` | ✅ all keywords hit |
+| `test_health` | 200 | ✅ |
+
+This is the first end-to-end run of the production TP>=2 path —
+real NCCL bootstrap, real two-channel broadcast through
+``EncoderScheduler._recv_messages`` (metadata over the TP CPU group,
+tensors over the TP device group), real allocation-ready gather.
 
 ## Recommendations
 
