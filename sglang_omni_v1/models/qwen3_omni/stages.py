@@ -832,6 +832,7 @@ def _build_sglang_encoder_scheduler(
     server_args_overrides: dict[str, Any] | None,
     dtype: str | None,
     load_format: str | None,
+    tp_parity_mode: str | None,
 ):
     """Build the SGLang encoder runner + EncoderScheduler for a stage."""
     from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
@@ -871,6 +872,7 @@ def _build_sglang_encoder_scheduler(
         dtype=dtype,
         load_format=load_format,
         server_args_overrides=server_args_overrides,
+        tp_parity_mode=tp_parity_mode,
     )
 
     return EncoderScheduler(
@@ -898,6 +900,7 @@ def create_image_encoder_runner(
     max_batch_wait_ms: int = 50,
     activation_budget_bytes: int | None = QWEN3_IMAGE_ENCODER_BATCH_BUDGET_BYTES,
     server_args_overrides: dict[str, Any] | None = None,
+    tp_parity_mode: str | None = None,
 ):
     """Build the image-encoder stage scheduler.
 
@@ -924,6 +927,7 @@ def create_image_encoder_runner(
             server_args_overrides=server_args_overrides,
             dtype=dtype,
             load_format=load_format,
+            tp_parity_mode=tp_parity_mode,
         )
     # Local fallback
     if tp_size > 1:
@@ -950,6 +954,7 @@ def create_audio_encoder_runner(
     max_batch_wait_ms: int = 50,
     activation_budget_bytes: int | None = None,
     server_args_overrides: dict[str, Any] | None = None,
+    tp_parity_mode: str | None = None,
 ):
     """Build the audio-encoder stage scheduler. See ``create_image_encoder_runner``."""
     chosen = _resolve_backend(backend, model_path, stage="audio_encoder")
@@ -967,6 +972,7 @@ def create_audio_encoder_runner(
             server_args_overrides=server_args_overrides,
             dtype=dtype,
             load_format=load_format,
+            tp_parity_mode=tp_parity_mode,
         )
     if tp_size > 1:
         raise ValueError(

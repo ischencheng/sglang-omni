@@ -177,12 +177,15 @@ def test_helper_rejects_encoder_fork_keys(key, value):
 
 def _stub_specs():
     """Minimal valid spec list for runner validation tests."""
-    from sglang_omni_v1.models.qwen3_omni.encoder_adapters import EncoderModuleSpec
+    from types import SimpleNamespace
+
     return (
-        EncoderModuleSpec(
+        SimpleNamespace(
             name="dummy",
             build_module=lambda hf, qc: None,
             checkpoint_prefixes=("dummy.",),
+            checkpoint_rewrites=(),
+            stacked_params_mapping=(),
         ),
     )
 
@@ -260,3 +263,67 @@ def test_runner_rejects_empty_encoder_specs():
             nccl_port=None,
             encoder_specs=(),
         )
+
+
+def test_runner_rejects_unknown_tp_parity_mode():
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import SGLangEncoderRunner
+
+    inst = SGLangEncoderRunner.__new__(SGLangEncoderRunner)
+    with pytest.raises(ValueError, match="tp_parity_mode"):
+        SGLangEncoderRunner.__init__(
+            inst,
+            model_path="dummy/model",
+            gpu_id=0,
+            tp_rank=0,
+            tp_size=1,
+            nccl_port=None,
+            encoder_specs=_stub_specs(),
+            tp_parity_mode="nope",
+        )
+
+
+def test_runner_accepts_fp32_linear_tp_parity_mode():
+    from sglang_omni_v1.model_runner.sglang_encoder_runner import (
+        _resolve_tp_parity_mode,
+    )
+
+    assert _resolve_tp_parity_mode("fp32_linear") == "fp32_linear"
+
+
+def test_runner_configures_tp_collective_switches(monkeypatch):
+    """Encoder runner bypasses upstream ModelRunner, so it must mirror
+    ModelRunner's all-reduce switch plumbing before TP group init."""
+    from types import SimpleNamespace
+
+    from sglang_omni_v1.model_runner import sglang_encoder_runner as sew
+
+    calls = {}
+    monkeypatch.setattr(
+        sew,
+        "set_custom_all_reduce",
+        lambda enabled: calls.setdefault("custom", enabled),
+    )
+    monkeypatch.setattr(
+        sew,
+        "set_mscclpp_all_reduce",
+        lambda enabled: calls.setdefault("mscclpp", enabled),
+    )
+    monkeypatch.setattr(
+        sew,
+        "set_torch_symm_mem_all_reduce",
+        lambda enabled: calls.setdefault("torch_symm_mem", enabled),
+    )
+
+    sew._configure_tp_collectives(
+        SimpleNamespace(
+            disable_custom_all_reduce=True,
+            enable_mscclpp=True,
+            enable_torch_symm_mem=False,
+        )
+    )
+
+    assert calls == {
+        "custom": False,
+        "mscclpp": True,
+        "torch_symm_mem": False,
+    }

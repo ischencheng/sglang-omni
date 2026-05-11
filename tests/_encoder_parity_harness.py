@@ -112,7 +112,208 @@ def _run_local(model_path: str, out_path: str) -> None:
         pickle.dump({"image_embeds": image_embeds, "deepstack": deepstack}, f)
 
 
-def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None, capture_layers: bool = False, dtype: str = "float16") -> None:
+def _parse_capture_blocks(spec: str | None, num_blocks: int) -> set[int]:
+    if spec is None or spec.strip() == "":
+        return set(range(num_blocks))
+    blocks: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start = int(start_s)
+            end = int(end_s)
+            blocks.update(range(start, end + 1))
+        else:
+            blocks.add(int(part))
+    bad = sorted(i for i in blocks if i < 0 or i >= num_blocks)
+    if bad:
+        raise SystemExit(
+            f"--capture-blocks contains out-of-range block indexes {bad}; "
+            f"valid range is 0..{num_blocks - 1}"
+        )
+    return blocks
+
+
+def _parse_index_set(spec: str | None) -> list[int] | None:
+    if spec is None or spec.strip() == "":
+        return None
+    indexes: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            indexes.update(range(int(start_s), int(end_s) + 1))
+        else:
+            indexes.add(int(part))
+    bad = sorted(i for i in indexes if i < 0)
+    if bad:
+        raise SystemExit(f"negative token indexes are not supported: {bad}")
+    return sorted(indexes)
+
+
+def _premerge_indices(final_indices: list[int] | None, merge: int) -> list[int] | None:
+    if final_indices is None:
+        return None
+    out: list[int] = []
+    for idx in final_indices:
+        out.extend(range(idx * merge, (idx + 1) * merge))
+    return out
+
+
+def _slice_capture_tensor(
+    tensor: torch.Tensor,
+    *,
+    final_indices: list[int] | None,
+    pre_indices: list[int] | None,
+) -> torch.Tensor:
+    if final_indices is None:
+        return tensor
+
+    final_max = max(final_indices)
+    pre_max = max(pre_indices or final_indices)
+    for dim, size in enumerate(tensor.shape[:2]):
+        if size > pre_max:
+            index = torch.tensor(pre_indices, dtype=torch.long, device=tensor.device)
+            return tensor.index_select(dim, index)
+        if size > final_max:
+            index = torch.tensor(final_indices, dtype=torch.long, device=tensor.device)
+            return tensor.index_select(dim, index)
+    return tensor
+
+
+def _all_gather_shard_output(
+    name: str,
+    module,
+    tensor: torch.Tensor,
+    *,
+    tp_size: int,
+    enabled: bool,
+) -> torch.Tensor:
+    """Gather TP shard-local debug captures into TP1-compatible layout."""
+    if not enabled or tp_size <= 1 or not torch.is_tensor(tensor) or tensor.dim() == 0:
+        return tensor
+
+    from sglang.srt.distributed import tensor_model_parallel_all_gather
+    from sglang.srt.layers.linear import ColumnParallelLinear
+
+    if isinstance(module, ColumnParallelLinear):
+        sizes = list(getattr(module, "output_partition_sizes", []) or [])
+        if len(sizes) > 1:
+            chunks = torch.split(tensor, sizes, dim=-1)
+            gathered_chunks = [
+                tensor_model_parallel_all_gather(chunk.contiguous(), dim=-1)
+                for chunk in chunks
+            ]
+            return torch.cat(gathered_chunks, dim=-1)
+        return tensor_model_parallel_all_gather(tensor.contiguous(), dim=-1)
+
+    # Merger mlp.1 is GELU over the shard-local ColumnParallelLinear output.
+    # Gather it too so the activation can be compared against tp=1 directly.
+    if name.endswith(".mlp.1") and module.__class__.__name__ == "GELU":
+        return tensor_model_parallel_all_gather(tensor.contiguous(), dim=-1)
+
+    return tensor
+
+
+def _all_gather_attention_backend_output(
+    tensor: torch.Tensor,
+    *,
+    tp_size: int,
+    enabled: bool,
+) -> torch.Tensor:
+    if not enabled or tp_size <= 1 or not torch.is_tensor(tensor) or tensor.dim() < 2:
+        return tensor
+
+    from sglang.srt.distributed import tensor_model_parallel_all_gather
+
+    # VisionAttention qkv_backend output is [tokens, local_heads, head_dim].
+    return tensor_model_parallel_all_gather(tensor.contiguous(), dim=1)
+
+
+def _patch_qkv_backend_capture(
+    attn,
+    name: str,
+    capture_tensor,
+    *,
+    tp_size: int,
+    capture_gathered_shards: bool,
+) -> None:
+    backend = getattr(attn, "qkv_backend", None)
+    forward = getattr(backend, "forward", None)
+    if forward is None:
+        return
+
+    def wrapped_forward(*args, **kwargs):
+        out = forward(*args, **kwargs)
+        if torch.is_tensor(out):
+            capture_tensor(
+                name,
+                backend,
+                _all_gather_attention_backend_output(
+                    out,
+                    tp_size=tp_size,
+                    enabled=capture_gathered_shards,
+                ),
+            )
+        return out
+
+    backend.forward = wrapped_forward
+
+
+def _register_block_internal_hooks(blk, index: int, grab_factory) -> None:
+    prefix = f"blk_{index:02d}"
+    for attr in ("norm1", "norm2"):
+        mod = getattr(blk, attr, None)
+        if mod is not None:
+            mod.register_forward_hook(grab_factory(f"{prefix}.{attr}"))
+
+    attn = getattr(blk, "attn", None)
+    if attn is not None:
+        attn.register_forward_hook(grab_factory(f"{prefix}.attn"))
+        for attr in ("qkv_proj", "qkv_backend", "proj"):
+            mod = getattr(attn, attr, None)
+            if mod is not None:
+                mod.register_forward_hook(grab_factory(f"{prefix}.attn.{attr}"))
+
+    mlp = getattr(blk, "mlp", None)
+    if mlp is not None:
+        mlp.register_forward_hook(grab_factory(f"{prefix}.mlp"))
+        for attr in ("linear_fc1", "linear_fc2"):
+            mod = getattr(mlp, attr, None)
+            if mod is not None:
+                mod.register_forward_hook(grab_factory(f"{prefix}.mlp.{attr}"))
+
+
+def _register_merger_internal_hooks(merger, prefix: str, grab_factory) -> None:
+    for attr in ("ln_q", "norm", "linear_fc1", "linear_fc2"):
+        mod = getattr(merger, attr, None)
+        if mod is not None:
+            mod.register_forward_hook(grab_factory(f"{prefix}.{attr}"))
+    mlp = getattr(merger, "mlp", None)
+    if mlp is not None:
+        for i, mod in enumerate(mlp):
+            mod.register_forward_hook(grab_factory(f"{prefix}.mlp.{i}"))
+
+
+def _run_sglang(
+    model_path: str,
+    out_path: str,
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
+    nccl_port: int | None = None,
+    capture_layers: bool = False,
+    capture_block_internals: bool = False,
+    capture_blocks: str | None = None,
+    capture_token_indices: str | None = None,
+    dtype: str = "float16",
+    tp_parity_mode: str = "default",
+    capture_gathered_shards: bool = False,
+) -> None:
     from sglang_omni_v1.model_runner.sglang_encoder_runner import (
         SGLangEncoderRunner,
     )
@@ -123,6 +324,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
     from sglang_omni_v1.scheduling.messages import IncomingMessage
 
     pixel, grid = _build_real_image_inputs(model_path)
+    final_capture_indices = _parse_index_set(capture_token_indices)
     runner = SGLangEncoderRunner(
         model_path=model_path,
         gpu_id=0,
@@ -131,6 +333,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         nccl_port=nccl_port,
         encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
         dtype=dtype,
+        tp_parity_mode=tp_parity_mode,
     )
 
     # Optional layer-output capture for tp1-vs-tp2 layer-by-layer
@@ -141,23 +344,63 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
     # final (N, base*(1+ndeepstack)) used to slice image_embeds +
     # deepstack.
     captures: dict[str, torch.Tensor] = {}
-    if capture_layers:
+    if capture_layers or capture_block_internals:
         visual = runner.model.visual
+        pre_capture_indices = _premerge_indices(
+            final_capture_indices,
+            int(getattr(visual, "spatial_merge_unit", 4)),
+        )
+
+        def _capture_tensor(name: str, mod, t: torch.Tensor) -> None:
+            t = _all_gather_shard_output(
+                name,
+                mod,
+                t,
+                tp_size=tp_size,
+                enabled=capture_gathered_shards,
+            )
+            captures[name] = _slice_capture_tensor(
+                t,
+                final_indices=final_capture_indices,
+                pre_indices=pre_capture_indices,
+            ).detach().cpu()
 
         def _grab(name: str):
-            def hook(_mod, _inp, out):
+            def hook(mod, _inp, out):
                 t = out[0] if isinstance(out, tuple) else out
                 if torch.is_tensor(t):
-                    captures[name] = t.detach().cpu()
+                    _capture_tensor(name, mod, t)
             return hook
 
         if hasattr(visual, "patch_embed"):
             visual.patch_embed.register_forward_hook(_grab("00_patch_embed"))
         if hasattr(visual, "blocks"):
+            selected_blocks = _parse_capture_blocks(
+                capture_blocks, len(visual.blocks)
+            )
             for i, blk in enumerate(visual.blocks):
-                blk.register_forward_hook(_grab(f"blk_{i:02d}"))
+                if capture_layers:
+                    blk.register_forward_hook(_grab(f"blk_{i:02d}"))
+                if capture_block_internals and i in selected_blocks:
+                    _register_block_internal_hooks(blk, i, _grab)
+                    attn = getattr(blk, "attn", None)
+                    if attn is not None:
+                        _patch_qkv_backend_capture(
+                            attn,
+                            f"blk_{i:02d}.attn.qkv_backend",
+                            _capture_tensor,
+                            tp_size=tp_size,
+                            capture_gathered_shards=capture_gathered_shards,
+                        )
         if hasattr(visual, "merger"):
             visual.merger.register_forward_hook(_grab("99_merger"))
+            if capture_block_internals:
+                _register_merger_internal_hooks(visual.merger, "99_merger", _grab)
+        if capture_block_internals and hasattr(visual, "deepstack_merger_list"):
+            for i, merger in enumerate(visual.deepstack_merger_list):
+                prefix = f"deepstack_merger_{i}"
+                merger.register_forward_hook(_grab(prefix))
+                _register_merger_internal_hooks(merger, prefix, _grab)
 
     hf_cfg = runner.model_config.hf_config
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
@@ -189,8 +432,17 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
     deepstack = state.get("deepstack_visual_embeds_image")
     if deepstack is not None:
         deepstack = [t.detach().cpu() for t in deepstack]
-    out_dict: dict[str, object] = {"image_embeds": image_embeds, "deepstack": deepstack}
-    if capture_layers:
+    out_dict: dict[str, object] = {
+        "image_embeds": image_embeds,
+        "deepstack": deepstack,
+        "metadata": {
+            "tp_parity_mode": tp_parity_mode,
+            "dtype": dtype,
+            "capture_token_indices": final_capture_indices,
+            "capture_gathered_shards": capture_gathered_shards,
+        },
+    }
+    if capture_layers or capture_block_internals:
         out_dict["layers"] = captures
     with open(out_path, "wb") as f:
         pickle.dump(out_dict, f)
@@ -296,7 +548,28 @@ def main() -> None:
     parser.add_argument("--tp-rank", type=int, default=0)
     parser.add_argument("--nccl-port", type=int, default=None)
     parser.add_argument("--capture-layers", action="store_true")
+    parser.add_argument("--capture-block-internals", action="store_true")
+    parser.add_argument(
+        "--capture-blocks",
+        default=None,
+        help="Comma-separated block indexes/ranges for --capture-block-internals, e.g. 25,26 or 20-26.",
+    )
+    parser.add_argument(
+        "--capture-token-indices",
+        default=None,
+        help="Comma-separated final-token indexes/ranges to keep in layer captures; pre-merger tensors keep the corresponding 2x2 patch tokens.",
+    )
+    parser.add_argument(
+        "--capture-gathered-shards",
+        action="store_true",
+        help="All-gather shard-local Column/QKV/Gate-Up debug captures so they can be compared with tp=1 full-width tensors.",
+    )
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
+    parser.add_argument(
+        "--tp-parity-mode",
+        default="default",
+        choices=["default", "fp32_row_parallel", "fp32_linear"],
+    )
     args = parser.parse_args()
 
     model_path = _resolve_model_path()
@@ -312,7 +585,12 @@ def main() -> None:
             tp_rank=args.tp_rank,
             nccl_port=args.nccl_port,
             capture_layers=args.capture_layers,
+            capture_block_internals=args.capture_block_internals,
+            capture_blocks=args.capture_blocks,
+            capture_token_indices=args.capture_token_indices,
             dtype=args.dtype,
+            tp_parity_mode=args.tp_parity_mode,
+            capture_gathered_shards=args.capture_gathered_shards,
         )
     print(
         f"PARITY_OK backend={args.backend} tp={args.tp_size} rank={args.tp_rank} "

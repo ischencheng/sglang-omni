@@ -67,7 +67,51 @@ RANK0_GPU=2 RANK1_GPU=3 \
 # 4. Compare each lane
 python tests/parity_compare.py /tmp/parity_local.pkl       /tmp/parity_sglang_tp1.pkl
 python tests/parity_compare.py /tmp/parity_local.pkl       /tmp/parity_sglang_tp2.pkl  # user-flagged lane
-python tests/parity_compare.py /tmp/parity_sglang_tp1.pkl  /tmp/parity_sglang_tp2.pkl
+python tests/parity_compare.py /tmp/parity_sglang_tp1.pkl  /tmp/parity_sglang_tp2.pkl --tp
+
+# Optional: rerun the SGLang lanes with fp32 RowParallelLinear matmul/reduce
+# for TP debug/parity characterization. This is intentionally not the default
+# production path. A stronger experimental mode, fp32_linear, also runs
+# shard-local ColumnParallelLinear/QKV/Gate-Up matmuls in fp32.
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
+  python tests/_encoder_parity_harness.py sglang /tmp/parity_sglang_tp1_fp32row.pkl \
+    --tp-size 1 --tp-parity-mode fp32_row_parallel
+RANK0_GPU=2 RANK1_GPU=3 EXTRA_ARGS="--tp-parity-mode fp32_row_parallel" \
+  bash tests/run_tp2_parity.sh /tmp/parity_sglang_tp2_fp32row.pkl 29702
+python tests/parity_compare.py /tmp/parity_sglang_tp1_fp32row.pkl \
+  /tmp/parity_sglang_tp2_fp32row.pkl --tp
+
+# Targeted follow-up for the remaining fp32-row outliers. Keeps only the
+# observed final-token outliers (2021 and 5642) plus their corresponding
+# pre-merger 2x2 patch tokens, so the layer pickle stays small enough for
+# fast iteration.
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
+  python tests/_encoder_parity_harness.py sglang \
+    /tmp/parity_sglang_tp1_fp32row_internal.pkl \
+    --tp-size 1 --tp-parity-mode fp32_row_parallel \
+    --capture-layers --capture-block-internals --capture-blocks 20-26 \
+    --capture-token-indices 2021,5642
+RANK0_GPU=2 RANK1_GPU=3 \
+  EXTRA_ARGS="--tp-parity-mode fp32_row_parallel --capture-layers --capture-block-internals --capture-blocks 20-26 --capture-token-indices 2021,5642" \
+  bash tests/run_tp2_parity.sh /tmp/parity_sglang_tp2_fp32row_internal.pkl 29703
+python tests/parity_compare.py /tmp/parity_sglang_tp1_fp32row_internal.pkl \
+  /tmp/parity_sglang_tp2_fp32row_internal.pkl --layers --top-layers 80
+
+# Stronger proof capture: gather shard-local Column/QKV/Gate-Up internals
+# into TP1-compatible layout before writing the layer pickle. This makes
+# qkv_proj / linear_fc1 / merger mlp.0/1 directly comparable instead of
+# shape-skipped.
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. \
+  python tests/_encoder_parity_harness.py sglang \
+    /tmp/parity_sglang_tp1_fp32linear_gathered.pkl \
+    --tp-size 1 --tp-parity-mode fp32_linear \
+    --capture-layers --capture-block-internals --capture-gathered-shards \
+    --capture-blocks 0-26 --capture-token-indices 2021,5642
+RANK0_GPU=2 RANK1_GPU=3 \
+  EXTRA_ARGS="--tp-parity-mode fp32_linear --capture-layers --capture-block-internals --capture-gathered-shards --capture-blocks 0-26 --capture-token-indices 2021,5642" \
+  bash tests/run_tp2_parity.sh /tmp/parity_sglang_tp2_fp32linear_gathered.pkl 29705
+python tests/parity_compare.py /tmp/parity_sglang_tp1_fp32linear_gathered.pkl \
+  /tmp/parity_sglang_tp2_fp32linear_gathered.pkl --layers --top-layers 120
 ```
 
 Each subprocess loads exactly one Qwen3-Omni instance, so the same GPU
@@ -290,6 +334,190 @@ than fp16 (vs HF reference, vs MMMU/GPQA benchmarks) is a separate
 question outside TP scope — flagged for a Phase 1+ follow-up RFC,
 not a Phase 0 change.
 
+### Result 2d — fp32 RowParallelLinear parity/debug mode tightens TP
+
+After adding ``tp_parity_mode="fp32_row_parallel"``, the same tp=1 vs
+tp=2 lane was rerun with every encoder ``RowParallelLinear`` patched to
+compute the local matmul in fp32, all-reduce the fp32 partial outputs,
+then cast back to model dtype. This is a debug/parity mode, not the
+default production path.
+
+| Tensor | default max abs | fp32-row max abs | default mean abs | fp32-row mean abs | fp32-row mean cos |
+|---|---:|---:|---:|---:|---:|
+| ``image_embeds`` | 0.266 | **0.127** | 0.00082 | **0.0004** | **0.999997** |
+| ``deepstack[0]`` | 0.0156 | **0.0049** | 0.00016 | **0.0001** | **0.999999** |
+| ``deepstack[1]`` | 0.1016 | **0.0146** | 0.00053 | **0.0003** | **0.999997** |
+| ``deepstack[2]`` | 0.1738 | **0.0356** | 0.00057 | **0.0003** | **0.999995** |
+
+Token-tail improvements:
+
+| Tensor | default tokens > 0.1 | fp32-row tokens > 0.1 | fp32-row tokens > 1.0 |
+|---|---:|---:|---:|
+| ``image_embeds`` | 13 | **2** | 0 |
+| ``deepstack[0]`` | 0 | 0 | 0 |
+| ``deepstack[1]`` | 1 | **0** | 0 |
+| ``deepstack[2]`` | 3 | **0** | 0 |
+
+The cosine tail also collapses: ``image_embeds`` has only one token below
+0.999 cosine and none below 0.99 (vs 7 tokens below 0.999 in the default
+path). The strict elementwise ``allclose(atol=1e-3, rtol=1e-3)`` still
+fails, so even the tightened debug mode should be judged by the TP gate,
+not RFC-era bit-style tolerance.
+
+**Interpretation.** This confirms the primary TP drift source is fp16
+partial-output rounding at row-parallel reductions. The remaining
+0.127 max-abs outlier likely comes from fp16 attention/GEMM shape
+differences and nonlinear amplification, not from an incorrect TP shard
+or gather path.
+
+### Result 2e — Remaining fp32-row outliers are LayerNorm/MLP amplification
+
+The targeted internal capture kept only the two post-merger final
+tokens that still exceed 0.1 in fp32-row mode (`2021`, `5642`) plus
+their corresponding pre-merger 2x2 patch tokens. This isolates the
+remaining tail without writing a huge full-layer pickle.
+
+Top layer/internal diffs for blocks 20-26:
+
+| captured tensor | max abs | mean abs | tokens > 1.0 | mean cos |
+|---|---:|---:|---:|---:|
+| `blk_26` | **101.5** | 0.1386 | 7 | 0.999831 |
+| `blk_26.mlp` | **100.5** | 0.1397 | 7 | 0.999920 |
+| `blk_26.mlp.linear_fc2` | **100.5** | 0.1397 | 7 | 0.999920 |
+| `blk_26.norm2` | 11.375 | 0.1369 | 3 | 0.999107 |
+| `blk_25.norm2` | 8.4375 | 0.1336 | 3 | 0.999326 |
+| `blk_24.norm2` | 2.75 | 0.1333 | 3 | 0.999572 |
+| `blk_24.norm1` | 2.6094 | 0.0209 | 1 | 0.999242 |
+| `blk_24.attn.proj` | 0.5547 | 0.0050 | 0 | 0.999848 |
+| `blk_26.attn.proj` | 0.2285 | 0.0155 | 0 | 0.999188 |
+| `99_merger` | 0.1270 | 0.0069 | 0 | 0.999314 |
+
+The important ordering is that the large selected-token error is
+already present at `norm2` before the final MLP, and attention
+outputs in the same captured blocks are much smaller. Because
+`fp32_row_parallel` also patches `blk_26.mlp.linear_fc2`, the 100.5
+there is not fp16 row-reduce noise; it is the MLP amplifying the
+incoming residual/LayerNorm delta.
+
+Some internals are intentionally skipped by the layer comparator:
+`qkv_proj`, `linear_fc1`, and merger `mlp.0`/`mlp.1` are shard-local
+`ColumnParallelLinear` outputs, so their last dimension is full-width
+at tp=1 and half-width per rank at tp=2 (for example 3456 vs 1728).
+They are useful for local rank inspection but are not directly
+comparable as full tensors without an explicit gather.
+
+**Conclusion.** The residual 0.127 final outlier is now explained as:
+small TP arithmetic differences enter the residual stream earlier,
+LayerNorm exposes them on a few near-sensitive patch tokens, the final
+MLP amplifies those tokens, and the spatial merger reduces the 100+
+pre-merger tail back to a 0.127 post-merger tail. This is a numerical
+stability/tolerance characterization, not evidence of a broken TP
+gather or rank slicing path.
+
+### Result 2f — Can the remaining outliers be removed?
+
+There are two different meanings of "removed":
+
+1. **Production TP path:** no. The remaining tail is the expected
+   consequence of running different TP arithmetic graphs and different
+   kernel shapes at fp16. Even with row-parallel reductions moved to
+   fp32, tp=2 still computes QKV/Gate-Up as shard-local GEMMs, attention
+   as fewer heads per rank, and row-parallel outputs as summed partials.
+   These are mathematically equivalent but not bit-equivalent to tp=1.
+2. **Debug/parity path:** mostly, but only by making tp=2 imitate tp=1
+   more closely. `fp32_linear` now patches both row-parallel and
+   column-parallel TP linear layers to run unquantized local GEMMs in
+   fp32. This should reduce the remaining `fp32_row_parallel` tail if it
+   is coming from Column/QKV/Gate-Up GEMM rounding or cublasLt kernel
+   shape choices.
+
+The hard limit is exact bit parity. To force that, tp=2 would need to
+replicate tp=1-style full-width operations on every rank: all-gather
+full QKV/Gate-Up inputs/weights or outputs, run attention with the same
+full-head tensor shape, and run row-parallel projections as one full
+GEMM rather than summed shard partials. That is a full-replica debug
+execution path, not tensor parallel inference; it would sacrifice the
+memory and performance benefits that TP is meant to provide.
+
+Empirically, `fp32_linear` only partially reduces the remaining final
+tail:
+
+| Tensor | fp32-row max abs | fp32-linear max abs | fp32-row tokens > 0.1 | fp32-linear tokens > 0.1 | fp32-linear mean cos |
+|---|---:|---:|---:|---:|---:|
+| `image_embeds` | 0.1270 | **0.1094** | 2 | **1** | 0.999997 |
+| `deepstack[0]` | 0.0049 | **0.0039** | 0 | 0 | 0.999999 |
+| `deepstack[1]` | **0.0146** | 0.0222 | 0 | 0 | 0.999996 |
+| `deepstack[2]` | **0.0356** | 0.0850 | 0 | 0 | 0.999995 |
+
+This rules out a simple "make every TP linear fp32 and the tail
+disappears" story. The final `image_embeds` outlier improves slightly,
+but deepstack tails are non-monotonic because changing Column/QKV/Gate-Up
+GEMM precision changes the intermediate arithmetic path that later
+attention, LayerNorm, and MLP blocks amplify. The practical TP gate still
+passes: no tensor has any token with max-abs diff above 1.0, and mean
+cosines stay above 0.999.
+
+### Result 2g — Proof protocol for the remaining TP error
+
+The current evidence is enough to rule out the known structural bugs:
+wrapper drift is zero, `patch_embed` is zero, row-parallel fp16 reduction
+is largely removed by `fp32_row_parallel`, and final tensors pass the TP
+gate. To prove the remaining tail is entirely from arithmetic path
+differences rather than shard/gather/layout bugs, use
+`--capture-gathered-shards`.
+
+That flag all-gathers shard-local debug outputs before they are saved:
+
+- `ColumnParallelLinear`, `QKVParallelLinear`, and
+  `MergedColumnParallelLinear` outputs are gathered by logical packed
+  segment, so QKV layout becomes `[all_q, all_k, all_v]`, matching tp=1.
+- `VisionAttention.qkv_backend.forward(...)` output is gathered along
+  the head dimension, so the attention-kernel output before `o_proj` is
+  directly comparable too.
+- Merger `mlp.1` GELU outputs are gathered along the hidden dimension,
+  matching tp=1's full-width activation.
+- The model forward path itself is unchanged; only the debug tensor
+  written into the pickle is gathered.
+
+The proof criterion is:
+
+1. `00_patch_embed` matches, and early norm outputs either match or are
+   the first recorded non-zero diff. This proves both lanes start from
+   the same unsharded image features.
+2. Gathered `*.qkv_proj` / `*.linear_fc1` shapes match tp=1 and have no
+   layout permutation. This proves the rank shard outputs concatenate
+   into the expected full tensor.
+3. For any first non-zero diff, inspect the immediately preceding
+   captured tensor. If the input is equal and the output differs, the
+   source is that module's arithmetic kernel/shape. If the input already
+   differs, follow the chain one module earlier.
+4. Once a diff appears, later LayerNorm, attention, and MLP blocks are
+   allowed to amplify it. This is exactly the compute-path explanation;
+   it is not evidence of incorrect slicing or gather.
+
+If a gathered shard tensor has a shape mismatch or a block-level output
+diff appears before any gathered linear/attention diff, that would falsify
+the hypothesis and should be treated as a real TP layout bug. Otherwise,
+the remaining mismatch is attributable to TP arithmetic path differences.
+
+First gathered-shard run on the historical fp32-row outlier tokens
+(`2021`, `5642`) supports the arithmetic-path hypothesis:
+
+| Probe | Result |
+|---|---|
+| shape mismatches after gathered capture | **0** |
+| `00_patch_embed` | max diff **0** |
+| first-layer gathered `qkv_proj` | bit-equal for `blk_00`; later blocks match shape and carry only propagated input noise |
+| first non-zero first-block diff | `blk_00.attn/proj`, max **4.88e-4** |
+| final selected-token merger diff | `99_merger` max **0.0352** |
+| largest selected-token pre-merger diff | `blk_26` max **4.125**, `blk_26.mlp.linear_fc2` max **4.0** |
+
+One caveat: under `fp32_linear`, the current final `image_embeds` max
+token moved from the historical `2021,5642` pair to token `3163`
+(`0.1094`). To prove the current final outlier end-to-end, rerun the
+gathered-shard capture with `--capture-token-indices 3163` after the
+`qkv_backend` capture hook is present.
+
 ## Result 3 — `backend="local"` (tp=1) vs `backend="sglang"` (tp=2)
 
 Closes the question: does the local-vs-sglang implementation gap
@@ -348,7 +576,9 @@ tensors over the TP device group), real allocation-ready gather.
    SGLang reimplementations, or NCCL fp16 collectives) actually
    guarantees on real inputs. A defensible bar:
    - `tp_size=1` vs `tp_size>1`: `mean_per_token_cosine_sim ≥ 0.999`
-     (passes today at 0.999984).
+     and `tokens_with_max_abs_diff > 1.0 == 0` across `image_embeds`
+     and deepstack tensors. This is now encoded in
+     `tests/parity_compare.py --tp` and passes today at 0.999984.
    - `backend="local"` vs `backend="sglang"`: not a bit-parity check
      at all; assert (a) shape + dtype + token count match, and (b)
      downstream semantic probes (the docs CI suite) produce equivalent
@@ -360,7 +590,14 @@ tensors over the TP device group), real allocation-ready gather.
    Re-run before any change to the SGLang vendor pin or to the
    encoder adapter.
 
-3. **Treat the 3.3% low-cosine token tail as a known
+3. **Use TP parity modes only for debug.** `fp32_row_parallel` patches
+   encoder `RowParallelLinear` modules to run local matmul and TP
+   all-reduce in fp32, then casts back to model dtype. `fp32_linear`
+   additionally patches shard-local `ColumnParallelLinear`/QKV/Gate-Up
+   GEMMs. These modes are for characterizing the tp=1 vs tp>1 numerical
+   gap; the production default stays on SGLang's normal fp16 path.
+
+4. **Treat the 3.3% low-cosine token tail as a known
    characterization, not a bug, until upstream SGLang vs HF
    transformers parity improves.** The two implementations
    independently verify against the trained weights — neither is the

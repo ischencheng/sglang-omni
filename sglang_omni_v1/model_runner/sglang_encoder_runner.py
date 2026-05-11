@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import logging
 import socket
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
@@ -48,6 +50,9 @@ from sglang.srt.distributed.parallel_state import (
     get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
+    set_custom_all_reduce,
+    set_mscclpp_all_reduce,
+    set_torch_symm_mem_all_reduce,
 )
 from sglang.srt.layers.dp_attention import initialize_dp_attention
 from sglang.srt.model_loader import get_model_loader
@@ -75,6 +80,8 @@ _RUNNER_MANAGED_KEYS = frozenset({
     "dtype", "load_format",
 })
 
+_TP_PARITY_MODES = frozenset({"default", "fp32_row_parallel", "fp32_linear"})
+
 
 def _pick_free_port() -> int:
     """Return an available loopback TCP port."""
@@ -96,6 +103,151 @@ def _resolve_quant_config(model_config: ModelConfig, load_config: LoadConfig) ->
     if qc is not None:
         return qc
     return getattr(model_config, "quant_config", None)
+
+
+def _configure_tp_collectives(server_args: Any) -> None:
+    """Mirror SGLang ModelRunner's TP collective switch setup.
+
+    ``initialize_model_parallel`` reads module-level switches in
+    ``parallel_state`` when it builds the TP group. The encoder runner
+    bypasses upstream ``ModelRunner``, so it must apply the same switches
+    itself before TP initialization; otherwise ServerArgs overrides such
+    as ``disable_custom_all_reduce`` are silently ignored.
+    """
+    set_custom_all_reduce(
+        not bool(getattr(server_args, "disable_custom_all_reduce", False))
+    )
+    set_mscclpp_all_reduce(bool(getattr(server_args, "enable_mscclpp", False)))
+    set_torch_symm_mem_all_reduce(
+        bool(getattr(server_args, "enable_torch_symm_mem", False))
+    )
+
+
+def _resolve_tp_parity_mode(mode: str | None) -> str:
+    resolved = mode or "default"
+    if resolved not in _TP_PARITY_MODES:
+        raise ValueError(
+            f"Unsupported tp_parity_mode={mode!r}; "
+            f"expected one of {sorted(_TP_PARITY_MODES)}"
+        )
+    return resolved
+
+
+def _row_parallel_forward_fp32(
+    self: Any,
+    input_: torch.Tensor,
+    skip_all_reduce: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """RowParallelLinear forward with fp32 local matmul + fp32 reduction.
+
+    This is a parity/debug path for encoder TP experiments. It preserves the
+    normal RowParallelLinear sharding semantics but avoids rounding each local
+    partial result to fp16 before the TP all-reduce. The output is cast back to
+    the input dtype so downstream kernels see the same dtype as the default
+    path.
+    """
+    from sglang.srt.distributed import (
+        get_tp_group,
+        split_tensor_along_last_dim,
+        tensor_model_parallel_all_reduce,
+    )
+    from sglang.srt.distributed.device_communicators.pynccl_allocator import (
+        use_symmetric_memory,
+    )
+    from sglang.srt.layers.dp_attention import is_allocation_symmetric
+
+    if self.input_is_parallel:
+        input_parallel = input_
+    else:
+        splitted_input = split_tensor_along_last_dim(
+            input_, num_partitions=self.tp_size
+        )
+        input_parallel = splitted_input[self.tp_rank].contiguous()
+
+    bias = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+
+    weight = getattr(self, "weight", None)
+    if weight is not None and getattr(self, "quant_config", None) is None:
+        output_parallel = F.linear(
+            input_parallel.to(torch.float32),
+            weight.to(torch.float32),
+            bias.to(torch.float32) if bias is not None else None,
+        )
+    else:
+        with use_symmetric_memory(
+            get_tp_group(), disabled=not is_allocation_symmetric()
+        ):
+            output_parallel = self.quant_method.apply(
+                self,
+                input_parallel,
+                bias=bias,
+            )
+        if output_parallel.is_floating_point():
+            output_parallel = output_parallel.to(torch.float32)
+
+    if self.reduce_results and self.tp_size > 1 and not skip_all_reduce:
+        output = tensor_model_parallel_all_reduce(output_parallel)
+    else:
+        output = output_parallel
+
+    if output.is_floating_point() and input_.dtype in (torch.float16, torch.bfloat16):
+        output = output.to(input_.dtype)
+
+    output_bias = self.bias if self.skip_bias_add else None
+    return output, output_bias
+
+
+def _column_parallel_forward_fp32(
+    self: Any,
+    input_: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """ColumnParallelLinear forward with fp32 local matmul.
+
+    This covers ColumnParallelLinear subclasses too, including
+    QKVParallelLinear and MergedColumnParallelLinear. It preserves the
+    normal shard-local output contract; it only changes the local GEMM
+    precision for parity/debug characterization.
+    """
+    from sglang.srt.distributed import tensor_model_parallel_all_gather
+
+    bias = self.bias if not self.skip_bias_add else None
+    weight = getattr(self, "weight", None)
+    if weight is not None and getattr(self, "quant_config", None) is None:
+        output_parallel = F.linear(
+            input_.to(torch.float32),
+            weight.to(torch.float32),
+            bias.to(torch.float32) if bias is not None else None,
+        )
+    else:
+        output_parallel = self.quant_method.apply(self, input_, bias)
+        if output_parallel.is_floating_point():
+            output_parallel = output_parallel.to(torch.float32)
+
+    if self.gather_output:
+        output = tensor_model_parallel_all_gather(output_parallel)
+    else:
+        output = output_parallel
+
+    if output.is_floating_point() and input_.dtype in (torch.float16, torch.bfloat16):
+        output = output.to(input_.dtype)
+
+    output_bias = self.bias if self.skip_bias_add else None
+    return output, output_bias
+
+
+def _enable_fp32_linear(model: nn.Module, *, include_column_parallel: bool) -> dict[str, int]:
+    """Patch TP linear modules in ``model`` for TP parity runs."""
+    from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
+
+    counts = {"row_parallel": 0, "column_parallel": 0}
+    for module in model.modules():
+        if isinstance(module, RowParallelLinear):
+            module.forward = MethodType(_row_parallel_forward_fp32, module)
+            counts["row_parallel"] += 1
+        elif include_column_parallel and isinstance(module, ColumnParallelLinear):
+            module.forward = MethodType(_column_parallel_forward_fp32, module)
+            counts["column_parallel"] += 1
+    return counts
 
 
 class EncoderModuleContainer(nn.Module):
@@ -281,6 +433,11 @@ class SGLangEncoderRunner:
         load_format: Optional load-format override forwarded to ``ServerArgs``.
         server_args_overrides: Extra ``ServerArgs`` kwargs (loader / processor
             knobs only — protected keys raise ``ValueError``).
+        tp_parity_mode: Optional debug mode for tp=1 vs tp>1 numerical
+            comparisons. ``"fp32_row_parallel"`` runs RowParallelLinear local
+            matmuls and TP all-reduces in fp32, then casts outputs back to the
+            model dtype. ``"fp32_linear"`` additionally runs shard-local
+            ColumnParallelLinear/QKV/Gate-Up matmuls in fp32.
     """
 
     def __init__(
@@ -295,6 +452,7 @@ class SGLangEncoderRunner:
         dtype: str | None = None,
         load_format: str | None = None,
         server_args_overrides: dict[str, Any] | None = None,
+        tp_parity_mode: str | None = None,
     ) -> None:
         if tp_size < 1:
             raise ValueError(f"tp_size must be >= 1 (got {tp_size})")
@@ -310,9 +468,20 @@ class SGLangEncoderRunner:
                 "class — that would load the LLM/talker on every encoder GPU."
             )
 
+        overrides = dict(server_args_overrides or {})
+        clobbered = sorted(_RUNNER_MANAGED_KEYS & overrides.keys())
+        if clobbered:
+            raise ValueError(
+                f"server_args_overrides cannot set runner-managed keys "
+                f"{clobbered}. These are derived from StageConfig and "
+                f"factory parameters; pass them through StageConfig "
+                f"(model_path, tp_size, gpu, dtype, load_format) instead."
+            )
+
         self.tp_rank = int(tp_rank)
         self.tp_size = int(tp_size)
         self.is_entry_rank = self.tp_rank == 0
+        self.tp_parity_mode = _resolve_tp_parity_mode(tp_parity_mode)
 
         # Forwarded for telemetry / debugging only — the runner hard-pins
         # cuda_device=0 because the launcher remap leaves only one device
@@ -328,16 +497,6 @@ class SGLangEncoderRunner:
         cuda_device = 0
         dist_local_rank = self.tp_rank
         self.device = torch.device(f"cuda:{cuda_device}")
-
-        overrides = dict(server_args_overrides or {})
-        clobbered = sorted(_RUNNER_MANAGED_KEYS & overrides.keys())
-        if clobbered:
-            raise ValueError(
-                f"server_args_overrides cannot set runner-managed keys "
-                f"{clobbered}. These are derived from StageConfig and "
-                f"factory parameters; pass them through StageConfig "
-                f"(model_path, tp_size, gpu, dtype, load_format) instead."
-            )
 
         server_args = build_sglang_encoder_server_args(
             model_path=model_path,
@@ -381,6 +540,7 @@ class SGLangEncoderRunner:
             local_rank=dist_local_rank,
             backend="nccl",
         )
+        _configure_tp_collectives(server_args)
         initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
         initialize_dp_attention(server_args, self.model_config)
         self.tp_group = get_tp_group()
@@ -393,6 +553,18 @@ class SGLangEncoderRunner:
         # container drop everything that doesn't match a declared
         # prefix.
         self.model = self._build_and_load_encoder(encoder_specs)
+        if self.tp_parity_mode in {"fp32_row_parallel", "fp32_linear"}:
+            counts = _enable_fp32_linear(
+                self.model,
+                include_column_parallel=self.tp_parity_mode == "fp32_linear",
+            )
+            logger.info(
+                "SGLangEncoderRunner tp_parity_mode=%s patched "
+                "%d RowParallelLinear and %d ColumnParallelLinear modules",
+                self.tp_parity_mode,
+                counts["row_parallel"],
+                counts["column_parallel"],
+            )
         self.model.eval()
 
         logger.info(
