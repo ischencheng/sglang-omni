@@ -112,7 +112,7 @@ def _run_local(model_path: str, out_path: str) -> None:
         pickle.dump({"image_embeds": image_embeds, "deepstack": deepstack}, f)
 
 
-def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None, capture_layers: bool = False) -> None:
+def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: int = 0, nccl_port: int | None = None, capture_layers: bool = False, dtype: str = "float16") -> None:
     from sglang_omni_v1.model_runner.sglang_encoder_runner import (
         SGLangEncoderRunner,
     )
@@ -130,7 +130,7 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
         tp_size=tp_size,
         nccl_port=nccl_port,
         encoder_specs=Qwen3OmniImageEncoderAdapter.encoder_specs,
-        dtype="float16",
+        dtype=dtype,
     )
 
     # Optional layer-output capture for tp1-vs-tp2 layer-by-layer
@@ -160,7 +160,8 @@ def _run_sglang(model_path: str, out_path: str, *, tp_size: int = 1, tp_rank: in
             visual.merger.register_forward_hook(_grab("99_merger"))
 
     hf_cfg = runner.model_config.hf_config
-    adapter = Qwen3OmniImageEncoderAdapter(hf_config=hf_cfg, dtype=torch.float16)
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+    adapter = Qwen3OmniImageEncoderAdapter(hf_config=hf_cfg, dtype=torch_dtype)
     msg = IncomingMessage(
         request_id="r0",
         type="new_request",
@@ -295,6 +296,7 @@ def main() -> None:
     parser.add_argument("--tp-rank", type=int, default=0)
     parser.add_argument("--nccl-port", type=int, default=None)
     parser.add_argument("--capture-layers", action="store_true")
+    parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     args = parser.parse_args()
 
     model_path = _resolve_model_path()
@@ -310,6 +312,7 @@ def main() -> None:
             tp_rank=args.tp_rank,
             nccl_port=args.nccl_port,
             capture_layers=args.capture_layers,
+            dtype=args.dtype,
         )
     print(
         f"PARITY_OK backend={args.backend} tp={args.tp_size} rank={args.tp_rank} "

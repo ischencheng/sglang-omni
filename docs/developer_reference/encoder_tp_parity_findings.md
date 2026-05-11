@@ -252,6 +252,44 @@ Reproduce with ``python tests/_encoder_parity_harness.py sglang
 <out> --tp-size 1 --capture-layers`` and the equivalent through
 ``run_tp2_parity.sh`` with ``EXTRA_ARGS=--capture-layers``.
 
+### Result 2c — Does bf16 tighten the TP parity? (No.)
+
+The previous v1 wrappers cast the bf16-native checkpoint to fp16
+(``_resolve_dtype(None) -> torch.float16`` in
+``models/qwen3_omni/stages.py``). Hypothesis worth testing: bf16's
+wider exponent range might prevent the blk_26 LayerNorm-near-zero
+amplification and reduce the tp=1 vs tp=2 final max-abs from 0.27.
+
+Captured the same layer-by-layer parity with
+``--dtype bfloat16`` on both ranks. Result is the opposite:
+
+| layer | fp16 max abs | bf16 max abs | bf16/fp16 |
+|---|---:|---:|---:|
+| ``00_patch_embed`` | 0 | 0 | — |
+| ``blk_00`` | 0.031 | **0.25** | 8× |
+| ``blk_08`` | 0.14 | **0.75** | 5× |
+| ``blk_09`` (softmax jump) | 6.12 | **59.75** | 10× |
+| ``blk_25`` | 7.34 | **59.25** | 8× |
+| ``blk_26`` (last block) | 448 | **1315** | 3× |
+| ``99_merger`` (final) | 0.27 | **1.03** | 4× |
+
+Mean cos sim of final image_embeds: fp16 = 0.999984, bf16 = 0.999111.
+
+Root cause of the gap: bf16 has 7 mantissa bits vs fp16's 10. Every
+NCCL all-reduce in ``attn.o_proj`` and ``mlp.down_proj`` introduces
+~8× more per-layer rounding noise in bf16. The wider exponent
+range doesn't compensate because the blk_26 amplification is a
+mantissa-precision problem (normalization denominator), not an
+underflow problem.
+
+**Implication.** The fp16 default in v1 was historically odd
+(checkpoint is bf16-native) but coincidentally gives tighter TP
+parity numbers. Switching to bf16 would make TP parity 4–8× worse
+on the metrics we track. Whether bf16 *serving quality* is better
+than fp16 (vs HF reference, vs MMMU/GPQA benchmarks) is a separate
+question outside TP scope — flagged for a Phase 1+ follow-up RFC,
+not a Phase 0 change.
+
 ## Result 3 — `backend="local"` (tp=1) vs `backend="sglang"` (tp=2)
 
 Closes the question: does the local-vs-sglang implementation gap
