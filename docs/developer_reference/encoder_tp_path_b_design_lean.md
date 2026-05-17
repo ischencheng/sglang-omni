@@ -291,6 +291,43 @@ share an OS process with siblings, while a TP stage must own its process
 exclusively. Forcing the TP-only env remap onto every SGLang-backed
 stage would break the shared-process invariant.
 
+### SGLang-backed stages must own their OS process
+
+The current process-grouping rule (`sglang_omni/config/topology.py:_build_process_groups`)
+only forbids `tp_size > 1` stages from sharing an OS process. For
+SGLang-backed encoders at `tp_size=1`, the topology code would
+otherwise happily merge two encoder stages with the same
+`stage.process` into one OS process — and that crashes at startup.
+
+`SGLangEncoderRunner.__init__` calls `init_distributed_environment` +
+`initialize_model_parallel` even at `tp_size=1`. Upstream
+`initialize_model_parallel`
+(`sglang/python/sglang/srt/distributed/parallel_state.py:1822-1823`)
+guards against re-init with a module-level
+`assert _TP is None`. The second SGLang-backed runner in the same
+process would hit that assertion and abort the process.
+
+Phase 0 rule: **any stage with `backend in {"sglang", "auto"}` must
+own its OS process exclusively**, regardless of `tp_size`. The
+topology builder must reject configs that assign two such stages to
+the same `process`. This rule sits next to the existing
+"TP stages must own their OS process exclusively" invariant in
+`stage_group.py:23-40`, and the placement planner enforces it
+pre-spawn.
+
+Implications for the launcher:
+
+- `tp_size > 1, backend="sglang"` — already exclusive by the
+  TP rule. No new behaviour.
+- `tp_size = 1, backend="sglang"` — the topology builder must put
+  this stage in its own `ProcessGroupPlacement`. Sharing with a
+  CPU-side sibling stage (preprocessing, decode) is **also**
+  rejected: SGLang's distributed-state machinery touches torch
+  internals that conflict with sibling stage logic even when the
+  sibling never calls SGLang.
+- `tp_size = 1, backend="local"` — unchanged. May share an OS
+  process with siblings per existing rules.
+
 `server_args_overrides` is for safe SGLang loading/runtime knobs such as
 quantization, load format, attention backend, and remote weight loading. It must
 not override rank topology, GPU placement, encoder-only mode, or AR-only memory

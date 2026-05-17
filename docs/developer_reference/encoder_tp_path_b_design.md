@@ -1195,6 +1195,37 @@ definitions remain upstream SGLang code.
 
 ### GPU placement across `tp_size=1` and `tp_size>1` lanes
 
+> **OBSOLETE (2026-05-17).** The contract in this entire subsection —
+> "runner always sees exactly one CUDA device as `cuda:0`, regardless
+> of `tp_size`", and the associated launcher-side `single_visible_device`
+> + `_resolve_factory_args` remap proposal in the
+> [Required launcher change](#required-launcher-change) subsection below
+> — is **not** implemented in Phase 0. The post-merge main has
+> `StageWorkerProcessSpec` topology that lets a non-TP stage share an
+> OS process with siblings, and an exclusivity invariant only for
+> `tp_size > 1` (`sglang_omni/pipeline/stage_group.py:23-40`). Forcing
+> every SGLang-backed stage through the TP-only env remap would break
+> the shared-process model. The current contract is:
+>
+> - `tp_size > 1, backend="sglang"` → launcher remaps
+>   `CUDA_VISIBLE_DEVICES` to one physical GPU; runner sees `cuda:0`;
+>   `dist_local_rank=tp_rank`. Unchanged.
+> - `tp_size = 1, backend="sglang"` → **no** env remap. Runner sees
+>   the host's full CUDA device list and pins `cuda_device` from the
+>   resolved `gpu_id` factory kwarg. Stage owns its OS process
+>   exclusively (see
+>   [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)).
+>
+> The full reasoning and rules are in
+> [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
+> at the end of this file. The rest of this subsection (and the
+> [Required launcher change](#required-launcher-change) subsection
+> below) remains as design-history context but **do not implement it
+> as written**. Treat every reference to "always cuda:0" / "launcher
+> remaps at tp_size=1" / "single_visible_device" / "extend
+> `_resolve_factory_args` to set `spec.single_visible_device`" in the
+> obsolete prose as superseded.
+
 This is a load-bearing detail because v1's per-process CUDA env remap
 in `pipeline/stage_process.py:222-249` is gated on `tp_size > 1`. The
 contract Plan B requires is:
@@ -2276,7 +2307,7 @@ instead of hidden in SGLang child-process defaults:
 ```python
 StageConfig(
     name="image_encoder",
-    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_runner",
+    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_executor",
     factory_args={
         "backend": "sglang",
         "max_batch_size": 32,
@@ -2341,7 +2372,7 @@ lockstep.
 ### Factory contract
 
 ```python
-def create_image_encoder_runner(
+def create_image_encoder_executor(
     model_path: str,
     *,
     # IMPORTANT: this signature default is `"local"` and stays "local"
@@ -3068,8 +3099,8 @@ Phase 0 — landing path that doesn't break v1:
      prevents a future signature-default flip from silently bypassing
      the CUDA isolation.
    - **Real-factory signature lock**: `import inspect` and assert that
-     `inspect.signature(create_image_encoder_runner).parameters["backend"].default == "local"`
-     and the same for `create_audio_encoder_runner`. The previous
+     `inspect.signature(create_image_encoder_executor).parameters["backend"].default == "local"`
+     and the same for `create_audio_encoder_executor`. The previous
      test only proves the resolver ignores signature defaults; this
      one proves the actual production factories never have their
      default flipped to `"auto"` or `"sglang"` by accident. Cheap to
@@ -3172,56 +3203,67 @@ Phase 0 — landing path that doesn't break v1:
      test below because Python would otherwise reject the duplicate
      keyword before helper code can run.
    - **AR-only knob protection — factory level**: call
-     `create_image_encoder_runner(...,
+     `create_image_encoder_executor(...,
      server_args_overrides={"mem_fraction_static": 0.5})` and assert
      the `ValueError` propagates from helper through runner
      `**overrides` splat. This locks the dict-style entry point users
      actually configure through `StageConfig.factory_args`.
    - **Encoder TP source-of-truth protection — factory level**: call
-     `create_image_encoder_runner(...,
+     `create_image_encoder_executor(...,
      server_args_overrides={"tp_size": 2})` and assert the same
      source-of-truth `ValueError` propagates before
      `build_sglang_encoder_server_args(...)` is called. Repeat for
      `base_gpu_id`, `dist_init_addr`, `dtype`, `load_format`, and for
-     `create_audio_encoder_runner`. This catches the user-facing
+     `create_audio_encoder_executor`. This catches the user-facing
      config shape where a deployment tries to configure encoder TP or
      GPU placement through `server_args_overrides` instead of
      `StageConfig.tp_size` / `StageConfig.gpu`.
-2. Add `sglang_omni_v1/model_runner/sglang_encoder_runner.py`. Behind
+2. Add `sglang_omni/model_runner/sglang_encoder_runner.py`. Behind
    `backend="sglang"` only — never the default in this PR. The runner
    builds `EncoderModuleContainer` from adapter-provided
    `EncoderModuleSpec`s and partial-loads matching checkpoint prefixes;
    it must not call `get_model()` on the full upstream
    `ForConditionalGeneration` class.
-3. Add `sglang_omni_v1/scheduling/encoder_scheduler.py` including the
+3. Add `sglang_omni/scheduling/encoder_scheduler.py` including the
    two-channel `_recv_messages` and the `BatchPlan` plumbing.
-4. Add `sglang_omni_v1/models/qwen3_omni/encoder_adapters.py` (image +
+4. Add `sglang_omni/models/qwen3_omni/encoder_adapters.py` (image +
    audio), including the visual/audio `EncoderModuleSpec`s and tests that
    the image stage does not load `audio_tower`/LLM/talker weights and the
    audio stage does not load visual/LLM/talker weights. The audio adapter
    includes the Phase 0 conservative `batch_cost_fn` and single-request guard;
    it does not use `request_cost_fn=0` / `max_batch_cost=None`.
-5. Update `create_image_encoder_runner()` and
-   `create_audio_encoder_runner()` to accept `backend`, `tp_rank`,
-   `tp_size`, `nccl_port`, `load_format`, `server_args_overrides`. Default
-   `backend="local"` keeps current behaviour.
+5. Extend the existing `create_image_encoder_executor()` and
+   `create_audio_encoder_executor()`
+   (`sglang_omni/models/qwen3_omni/stages.py:781,823`) with
+   `backend: Literal["local", "sglang", "auto"] = "local"`, plus
+   `tp_rank`, `tp_size`, `nccl_port`, `load_format`,
+   `server_args_overrides`. Factory names stay; only the body branches.
+   Existing `sglang_omni/models/qwen3_omni/config.py:45,59` references
+   keep working unchanged.
 6. Add a Qwen3-Omni config variant (`qwen3_omni_encoder_tp.py` or a CLI
    override) that sets `backend="sglang", tp_size=2` and declares
-   `StageMemoryConfig` for image/audio encoder stages.
+   `runtime.resources.total_gpu_memory_fraction` +
+   `runtime.resources.encoder_activation_budget_bytes` for image/audio
+   encoder stages.
 
 Phase 1 — parity validation (gates Phase 2):
 
 7. GPU parity test: `backend="local"` vs `backend="sglang", tp_size=1` on
    image encoder and audio encoder, in isolation, at a non-zero
-   `gpu` (e.g. `gpu=4`). Asserts the launcher remap took effect:
-   child env has `CUDA_VISIBLE_DEVICES=="4"`,
-   `next(model.parameters()).device.index == 0` (the only visible CUDA
-   device shows up as `cuda:0` inside the child), and
-   `get_world_group().local_rank == 0`.
+   `gpu` (e.g. `gpu=4`). At `tp_size=1` the launcher does **not** remap
+   `CUDA_VISIBLE_DEVICES`; the runner pins `cuda_device` from the
+   resolved `gpu_id` factory kwarg directly. Asserts the runner ended
+   up on the configured GPU: child env keeps the host's
+   `CUDA_VISIBLE_DEVICES` unchanged, and
+   `next(model.parameters()).device.index == 4`. The
+   `tp_size > 1` lane (test 8 below) verifies the remap shape.
 8. TP parity test: `backend="sglang", tp_size=1` vs `tp_size=2`, within
-   `atol=1e-3, rtol=1e-3` on float16. Asserts
-   `get_world_group().local_rank` is unique per rank in the `tp_size=2`
-   case.
+   the empirical tolerance described in
+   `encoder_tp_parity_findings.md` (not the original `atol=1e-3, rtol=1e-3`,
+   which fp16 NCCL collectives cannot guarantee). At `tp_size=2` the
+   launcher remaps `CUDA_VISIBLE_DEVICES` so the runner sees `cuda:0`;
+   assert `next(model.parameters()).device.index == 0` per rank and
+   `get_world_group().local_rank` is unique per rank.
 9. E2E speech run: long-video request that previously OOM'd on the
    thinker GPU, run with image+audio encoders sharded to separate GPUs,
    verify it completes.
@@ -3584,10 +3626,59 @@ What this means for encoder TP launch:
   the host's full CUDA device list. It pins `cuda_device` directly
   from the resolved `gpu_id` factory kwarg. `nccl_port` is allocated
   by the parent for every SGLang-backed stage (no child-side free-port
-  probe).
+  probe). **This stage owns its OS process exclusively** — see
+  [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)
+  below.
 - **`backend="local", tp_size = 1`** — no change. Stays in
   `SimpleScheduler`, may share an OS process with sibling stages per
   the new topology rules.
+
+### SGLang-backed stages must own their OS process
+
+`_build_process_groups` (`sglang_omni/config/topology.py:65-80`) only
+forbids `tp_size > 1` stages from sharing an OS process. It does **not**
+forbid two `tp_size=1` stages with the same `stage.process` value from
+landing in one OS process. For SGLang-backed encoder stages that is
+unsafe:
+
+`SGLangEncoderRunner.__init__` calls `init_distributed_environment` +
+`initialize_model_parallel` even at `tp_size=1` so SGLang's
+TP-aware layers (`ColumnParallelLinear` / `RowParallelLinear` /
+`QKVParallelLinear`) have a valid TP group to query. Upstream
+`initialize_model_parallel`
+(`sglang/python/sglang/srt/distributed/parallel_state.py:1822-1823`)
+checks `assert _TP is None` against a module-level global. A second
+SGLang-backed runner in the same OS process would trip that assertion
+the moment it tries to initialize its own TP group. SGLang doesn't
+support multiple disjoint TP groups inside one process today.
+
+Phase 0 rule: **any stage with resolved `backend in {"sglang", "auto"}`
+must own its OS process exclusively**, regardless of `tp_size`. This
+extends the existing "TP stages must own their process exclusively"
+invariant in `stage_group.py:23-40` (which checks `tp_size > 1`) with a
+parallel SGLang-backend check.
+
+Where the check belongs:
+
+- `_build_process_groups` (topology): when grouping stages by
+  `stage.process`, treat any SGLang-backend stage as its own
+  singleton group. Pre-spawn, raise `ValueError` if two
+  SGLang-backend stages declare the same `stage.process`, naming
+  both stages.
+- `_get_worker_process_env` (`stage_group.py`): extend the
+  exclusivity assertion to fire for `stage.factory_args["backend"] in
+  {"sglang", "auto"}` as well as `tp_size > 1`. Belt-and-suspenders
+  for callers that bypass the topology builder.
+
+What this rule does **not** require:
+
+- Forcing an env remap. `tp_size=1, backend="sglang"` still uses the
+  no-remap path described above.
+- Forbidding co-location at the **GPU** level. Two SGLang-backed
+  encoder stages on the same GPU are fine as long as they live in
+  separate OS processes (the existing PR #430 colocation memory
+  accounting handles that case).
+- Changing anything for `backend="local"` stages.
 
 The launcher predicate is the same shape as before:
 
