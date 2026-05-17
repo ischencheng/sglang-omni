@@ -144,18 +144,37 @@ new:  Stage -> EncoderScheduler -> SGLangEncoderRunner -> upstream encoder submo
 Three observations from the code walk drive Plan B:
 
 1. **The TP launch infrastructure already exists.** `_build_tp_stage_specs`
-   in `pipeline/mp_runner.py:164-225` already mints one `StageProcessSpec`
-   per TP rank, allocates a per-stage NCCL port, builds
-   `follower_work_queues` / `follower_abort_queues`, and tags rank 0 as
-   `leader`. `get_stage_process_env` (`pipeline/stage_process.py:222-276`)
-   already pins each child to a single GPU through `CUDA_VISIBLE_DEVICES` +
-   `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`. Plan B requires three small
-   `pipeline/` + `serve/` changes on top of this: a `single_visible_device`
-   spec flag, the launcher entry-point forcing `MultiProcessPipelineRunner`
-   for any `backend in {"sglang", "auto"}` stage, and a `compile_pipeline()`
-   sanity reject for the same — see [GPU placement across `tp_size=1`
-   and `tp_size>1` lanes](#gpu-placement-across-tp_size1-and-tp_size1-lanes)
-   for the load-bearing reason and the exact change.
+   in `sglang_omni/pipeline/mp_runner.py` already mints one
+   `StageProcessSpec` per TP rank, allocates a per-stage NCCL port,
+   builds `follower_work_queues` / `follower_abort_queues`, and tags
+   rank 0 as `leader`. `get_stage_process_env`
+   (`sglang_omni/pipeline/stage_process.py:292`) already pins each TP
+   child to a single GPU through `CUDA_VISIBLE_DEVICES` +
+   `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`. The launcher
+   (`sglang_omni/serve/launcher.py:212`) unconditionally routes through
+   `MultiProcessPipelineRunner`, so there is no single-process branch
+   to gate. Plan B adds three small changes on top of this baseline:
+   - **Process exclusivity for SGLang-backed stages** in
+     `build_process_topology_plan` (`sglang_omni/config/topology.py:36`):
+     any process group containing a stage with resolved
+     `backend in {"sglang", "auto"}` must have exactly one member.
+   - **No CUDA env remap at `tp_size=1`**: `get_stage_process_env` keeps
+     its existing `if spec.tp_size <= 1: return {}` early return. The
+     SGLang encoder runner pins `cuda_device` directly from the
+     resolved `gpu_id` factory kwarg.
+   - **TP preflight + parent-allocated `nccl_port`** in
+     `_build_stage_groups` (`sglang_omni/pipeline/mp_runner.py:37`):
+     Layer 1 rejects any TP stage whose factory does not accept
+     `tp_rank/tp_size/nccl_port`; Layer 2 (backend-aware factories
+     only) rejects `tp_size > 1` unless resolved `backend == "sglang"`.
+     The runner allocates a NCCL port for every SGLang-backed stage
+     including `tp_size=1` and injects it into the resolved factory
+     args; `SGLangEncoderRunner` rejects `nccl_port=None`.
+
+   The earlier obsolete proposals (a `single_visible_device` spec flag
+   and a `compile_pipeline()` sanity reject) are no longer needed — see
+   the supersede note at the top of this file for what was retracted
+   and why.
 
 2. **The Stage-level leader/follower control fan-out is already wired, but
    data-plane fan-out is not.** `Stage.run()` mirrors
@@ -3332,8 +3351,9 @@ Phase 2 — switch new deployments to the SGLang backend:
 
     Do **not** change the factory function's signature default — it
     stays `"local"` forever. The launcher reads
-    `_resolve_factory_args(...).get("backend", "local")` and only sees
-    `factory_args` + `runtime_overrides`, never the signature default
+    `resolve_stage_factory_args(...).get("backend", "local")`
+    (`sglang_omni/config/runtime.py:15`) and only sees `factory_args`
+    + `runtime_overrides`, never the signature default
     (see [Backend resolution contract](#backend-resolution-contract)).
     Bumping the signature default would create the "launcher sees
     local, factory sees auto" mismatch that silently bypasses the
@@ -3389,11 +3409,22 @@ Minimum lanes (unit + GPU + E2E):
     and fail early if required constructor / forward / length-helper
     signatures disappear.
   - Admission control: image/video additive cost enforces
-    `activation_budget_bytes`; audio `batch_cost_fn` accounts for
-    max-time padding and rejects oversized single requests before TP fan-out.
-  - Memory planner: co-located encoder + thinker ranks on the same physical
-    GPU sum `StageMemoryConfig` budgets and apply the encoder reserve to the
-    thinker `ServerArgs` before child launch.
+    `runtime.resources.encoder_activation_budget_bytes`; audio
+    `batch_cost_fn` accounts for max-time padding and rejects
+    oversized single requests before TP fan-out. The injection lands
+    via `resolve_stage_factory_args` exactly on the
+    `encoder_activation_budget_bytes` kwarg name; any value of that
+    field in `factory_args` / `runtime_overrides` is rejected by
+    `reject_untyped_encoder_activation_budget_bytes`.
+  - Memory: co-located encoder + thinker on the same physical GPU
+    runs unchanged through PR #430's process-scoped accounting
+    (`SGLModelRunner._profile_available_bytes`). Validate by
+    inspecting the AR memory-profile log line — the AR runner
+    reports `gpu_mem_accounting=nvml_process` (or
+    `stage_load_fallback`), and the available-for-KV value matches
+    `total_memory * total_gpu_memory_fraction - process_used` within
+    a small tolerance. There is no planner-side `StageMemoryConfig`
+    aggregation step on current main.
 
 - **GPU**
   - Qwen3-Omni image encoder: `backend="local"` vs `backend="sglang",
