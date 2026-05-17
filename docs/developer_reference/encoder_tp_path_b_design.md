@@ -2232,6 +2232,40 @@ StageConfig(
 `relay_budget_bytes` are consumed by the parent placement/memory planner before
 any child process starts.
 
+#### Injection contract for `activation_budget_bytes`
+
+`StageMemoryConfig.activation_budget_bytes` and the scheduler-side
+`max_batch_cost` must always be the same number, otherwise the planner
+budget and the scheduler admission cap diverge silently. The current v1
+resolution path (`config/compiler.py:_resolve_factory_args`) merges
+`StageConfig.factory_args` with `PipelineConfig.runtime_overrides`, then
+passes the merged dict to the factory verbatim
+(`mp_runner.py:_build_stage_groups` line 72). It does **not** read
+`StageConfig.memory`.
+
+Phase 0 extends `_resolve_factory_args` for backend-aware encoder
+factories with two rules:
+
+1. **Injection**: after merging `factory_args` + `runtime_overrides`, if
+   `StageConfig.memory.activation_budget_bytes` is set, inject it as
+   `factory_args["activation_budget_bytes"]` in the resolved dict.
+2. **Conflict reject**: if `activation_budget_bytes` already appears in
+   the merged `factory_args` / `runtime_overrides`, raise `ValueError`
+   pointing at both sources. `StageMemoryConfig` is the single
+   declaration; an admission cap that bypasses the planner budget is a
+   configuration bug, not a valid override.
+
+The factory receives a final `activation_budget_bytes` kwarg and passes
+it straight into `EncoderScheduler(max_batch_cost=...)`. Both the
+planner's per-GPU aggregation and the scheduler's per-iteration admission
+read from the same `StageMemoryConfig` field.
+
+The same rule applies to `weight_budget_bytes` and `relay_budget_bytes`:
+they are not factory kwargs in Phase 0, so the conflict-reject only needs
+to fire on `activation_budget_bytes`. If any future factory kwarg
+duplicates a `StageMemoryConfig` field, this rule should be extended in
+lockstep.
+
 ### Factory contract
 
 ```python
@@ -2632,27 +2666,90 @@ explicit rule, a user who pins `mem_fraction_static=0.85` next to a
 co-located encoder budget gets neither side honoured: the thinker takes
 0.85, the encoder gets nothing reserved, encoder forward OOMs.
 
-Phase 0 rule:
+Before stating the rule, pin down the load-order and base-memory contract,
+because the naive formula
+`(1 - mem_fraction_static) * total_gpu_bytes` is wrong against how SGLang
+actually allocates KV.
 
-1. **User-pinned + co-located encoder → planner validates, never silently
-   overrides.** If `mem_fraction_static` is pinned via factory args / CLI /
-   `runtime_overrides` and the planner has a co-located encoder reserve on
-   the same physical GPU, the planner checks
-   `(1 - mem_fraction_static) * total_gpu_bytes >= encoder_reserve_bytes`
-   before any child spawns. If the inequality fails, launch raises a
+##### Why `total_gpu_bytes` is the wrong base
+
+Upstream `_profile_available_bytes`
+(`sglang/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py:61-75`)
+computes:
+
+```text
+rest_memory = post_model_load_memory - pre_model_load_memory * (1 - mem_fraction_static)
+```
+
+The base is **measured GPU memory at load time**, not physical total VRAM.
+Under co-location, if the encoder loads before the thinker, the thinker's
+`pre_model_load_memory` already excludes the encoder weights — so the
+thinker's KV reserve is `(1 - mem_fraction_static)` of an
+already-shrunk number. If the thinker loads first and the encoder loads
+after, the order flips and the formula yields a different reserve. A
+validator that compares against `total_gpu_bytes` will pass cases that
+SGLang's own KV sizing will reject after spawn.
+
+##### Phase 0 load-order assumption
+
+`MultiProcessPipelineRunner._build_stage_groups` (`pipeline/mp_runner.py:300-304`)
+spawns every group with `group.spawn(ctx)` before any `wait_ready`. There is
+no enforced load-order between co-located encoder and thinker today.
+
+Phase 0 fixes this by requiring the planner to serialize co-located AR
+stage loads behind co-located encoder loads on the same physical GPU:
+
+- Within a single physical GPU, all encoder ranks must reach `ready` before
+  any thinker / talker rank on that GPU begins
+  `init_memory_pool` / `_profile_available_bytes`.
+- The planner adds a per-GPU readiness barrier that AR stages await before
+  their `init_memory_pool` runs. The encoder ranks have no such gate —
+  they load immediately.
+- Same-GPU AR stage processes still share the existing PR #430 startup
+  lock (`SGLModelRunner` colocated path) so two AR loaders never overlap.
+
+This makes the thinker's `post_model_load_memory` deterministic given the
+declared topology: it equals
+`total_gpu_bytes - sum_co_located_encoder_resident_bytes` at thinker load
+time.
+
+##### Phase 0 reserve rules
+
+With the load order pinned, the planner-side rules are:
+
+1. **User-pinned + co-located encoder → planner validates against
+   planned-available, never silently overrides.** Compute
+   `planned_available_bytes_after_encoder_load = total_gpu_bytes - Σ co-located encoder resident bytes`.
+   Then check
+   `planned_available_bytes_after_encoder_load * (1 - mem_fraction_static) >= encoder_activation_reserve_bytes`.
+   Encoder *weight* bytes are already subtracted from the base because
+   they're resident before the thinker loads; the planner only re-validates
+   that the thinker's KV reserve fraction still leaves enough headroom for
+   peak encoder activations. If the inequality fails, launch raises a
    `ValueError` naming both stages and showing the numbers.
-2. **No user pin + co-located encoder → planner applies the reserve via
-   the existing bridge.** `StageConfig.memory.{weight_budget_bytes,
-   activation_budget_bytes}` for the co-located encoder are summed,
-   converted to a fraction of total GPU memory, and passed into
-   `apply_encoder_mem_reserve` (or its successor). The thinker's auto-picked
-   `mem_fraction_static` is reduced accordingly.
+2. **No user pin + co-located encoder → planner applies a reserve fraction
+   delta to the auto-picked value.** The planner computes the encoder
+   activation reserve as a fraction of `planned_available_bytes_after_encoder_load`
+   and passes the delta into `apply_encoder_mem_reserve`. The encoder weight
+   budget does not need a separate reserve — it is already resident before
+   `_profile_available_bytes` runs.
 3. **No co-located encoder → bridge is a no-op.** The thinker either uses
    the user-pinned `mem_fraction_static` or SGLang's auto value, unchanged.
 
 The planner never silently overrides a user-pinned `mem_fraction_static`.
 Conflicts surface as validation errors at compile / `_build_stage_groups`
 time, before any subprocess spawns.
+
+##### Why not `total_gpu_bytes` directly
+
+A conservative validator could use `total_gpu_bytes` as a strict upper
+bound (assume nothing else has loaded yet). That over-rejects:
+co-located encoder + thinker on a single H200 has 141 GB total, encoder
+weights ~2.5 GB resident, thinker weights ~57 GB; the encoder's activation
+reserve only needs to fit inside the thinker's KV-fraction headroom of
+`(1 - mem_fraction_static) * (141 - 2.5)`, not
+`(1 - mem_fraction_static) * 141`. The `planned_available` base captures
+this difference without depending on observed runtime state.
 
 #### Future migration
 

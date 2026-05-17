@@ -359,6 +359,14 @@ StageConfig(
 )
 ```
 
+`activation_budget_bytes` declaration is single-sourced from
+`StageMemoryConfig`. The factory-args resolver injects it as a factory
+kwarg after merging `factory_args` + `runtime_overrides`. If
+`activation_budget_bytes` also appears in either of those, resolution
+fails with a `ValueError` — admission cap and planner budget must not
+diverge silently. The detailed RFC has the resolver-side sketch:
+[`encoder_tp_path_b_design.md` → Injection contract for `activation_budget_bytes`](encoder_tp_path_b_design.md#injection-contract-for-activation_budget_bytes).
+
 Backend rules:
 
 - `backend="local"` keeps the current local HF `SimpleScheduler` path and is
@@ -440,21 +448,37 @@ lives inside the thinker stage factory, not on `StageConfig`. Phase 0 encoder
 TP adds the missing **planner-side** input — `StageConfig.memory` — that the
 PR #430 bridge can read instead of probing SGLang auto-allocation behaviour.
 
+Load-order assumption (Phase 0): on each physical GPU, all co-located
+encoder ranks reach ready before any AR (thinker / talker) rank on that
+GPU runs `init_memory_pool`. The planner enforces this with a per-GPU
+readiness barrier. The base memory the thinker sees at load time is then
+deterministic: `total_gpu_bytes - Σ co-located encoder resident bytes`.
+
+This matters because upstream SGLang computes the KV reserve as
+`(1 - mem_fraction_static) * pre_model_load_memory`
+(`model_runner_kv_cache_mixin.py:69`), not as a fraction of physical total
+VRAM. A validator that bases on `total_gpu_bytes` will pass cases SGLang
+later rejects.
+
 Interaction with user-set `mem_fraction_static`:
 
 - If the user pins `mem_fraction_static` via factory args / CLI **and** the
   planner has a co-located encoder reserve for the same GPU, the planner
-  must **validate** that the pinned value already leaves room for the
-  encoder reserve. If `(1 - mem_fraction_static) * total_gpu_bytes` is less
-  than the encoder reserve required by `StageMemoryConfig` on the same GPU,
-  launch fails with a `ValueError` naming both stages.
-- If the user does not pin `mem_fraction_static`, the planner reads
-  `StageMemoryConfig.weight_budget_bytes + activation_budget_bytes` for the
-  co-located encoder, converts to a fraction of total GPU memory, and
-  subtracts from SGLang's auto-selected `mem_fraction_static` via the
-  existing `apply_encoder_mem_reserve` path.
+  validates against the planned-available base after encoder load:
+  `(1 - mem_fraction_static) * (total_gpu_bytes - encoder_resident_bytes)`
+  must be `>= encoder_activation_reserve_bytes`. If not, launch fails
+  with a `ValueError` naming both stages.
+- If the user does not pin `mem_fraction_static`, the planner computes the
+  encoder activation reserve as a fraction of the same planned-available
+  base and passes the delta into `apply_encoder_mem_reserve`. Encoder
+  weight bytes are already resident before the thinker loads, so they do
+  not need a separate reserve.
 - The planner never silently overrides a user-pinned `mem_fraction_static`.
   Conflicts surface as validation errors before any child process spawns.
+
+The detailed RFC has the full derivation of why `total_gpu_bytes` alone is
+the wrong base and how the per-GPU readiness barrier is implemented; see
+[`encoder_tp_path_b_design.md` → Interaction with user-pinned `mem_fraction_static`](encoder_tp_path_b_design.md#interaction-with-user-pinned-mem_fraction_static).
 
 ## Naming
 
