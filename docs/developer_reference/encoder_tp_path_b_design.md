@@ -3063,26 +3063,28 @@ Phase 0 — landing path that doesn't break v1:
      resolved `gpu_id` factory kwarg. The
      `single_visible_device: bool` flag proposed in the obsolete
      sections above is **not** added.
-   - **Launcher MP forcing.** In `serve/launcher.py`, extend the
-     `needs_mp` predicate so any stage with resolved
-     `backend in {"sglang", "auto"}` forces
-     `MultiProcessPipelineRunner`, even on a single-GPU / `tp_size=1`
-     pipeline. Without this the launcher short-circuits to
-     `compile_pipeline()` and the runner never gets its own process
-     for distributed init.
-   - **`compile_pipeline` reject.** In `sglang_omni/config/compiler.py`,
-     reject any stage with resolved `backend in {"sglang", "auto"}`
-     OR `stage_cfg.tp_size > 1`. The `tp_size > 1` reject is
-     structural: the single-process compile path never injects
-     `tp_rank/tp_size/nccl_port` and would silently downgrade. It
-     does not regress normal serving because the launcher's
-     `needs_mp` rule routes any `tp_size > 1` to
-     `MultiProcessPipelineRunner` first.
-   - **TP preflight.** In `MultiProcessPipelineRunner._build_stage_groups`,
-     run the two-layer preflight: Layer 1 rejects any TP stage whose
-     factory does not accept `tp_rank/tp_size/nccl_port`; Layer 2
-     rejects TP stages whose resolved backend is not `"sglang"` —
-     `backend="local"` or `"auto"` plus `tp_size > 1` cannot work.
+   - **No launcher MP gating.** `sglang_omni/serve/launcher.py:212`
+     already routes every pipeline through `MultiProcessPipelineRunner`
+     unconditionally; there is no longer a `needs_mp` predicate to
+     extend and no single-process `compile_pipeline()` to reject from.
+     The earlier obsolete plan that proposed those edits is superseded
+     by the post-merge launcher topology.
+   - **TP preflight.** Inside `_build_stage_groups`
+     (`sglang_omni/pipeline/mp_runner.py:37`), run a two-layer
+     preflight before any subprocess spawns:
+     - **Layer 1** — any stage with `tp_size > 1` must have a factory
+       whose signature accepts `tp_rank`, `tp_size`, and `nccl_port`.
+       This is the universal "TP-capable factory" check and applies
+       to thinker / talker / encoder uniformly.
+     - **Layer 2 (backend-aware factories only)** — if the factory's
+       signature contains a `backend` parameter (i.e. is one of the
+       encoder factories `create_image_encoder_executor` /
+       `create_audio_encoder_executor`), additionally require
+       `tp_size > 1` ⇒ resolved `backend == "sglang"`. AR factories
+       (`create_sglang_thinker_executor_from_config`,
+       `create_talker_executor_from_config`) take TP launch params
+       but expose no `backend` parameter — they pass Layer 1
+       unchanged and are not subject to Layer 2.
    - **Parent-allocated `nccl_port`.** Allocate an `nccl_port` for
      every SGLang-backed stage, including `tp_size=1`, and pass it
      through resolved `factory_args`. Production
@@ -3120,71 +3122,71 @@ Phase 0 — landing path that doesn't break v1:
    [Launch path reconciliation with main](#launch-path-reconciliation-with-main).
 
    **Per-sub-step unit tests** (so each launcher change can be verified
-   independently of the GPU lane in Phase 1):
+   independently of the GPU lane in Phase 1). These tests target the
+   real call sites (`_build_stage_groups`, `build_process_topology_plan`,
+   `resolve_stage_factory_args`) — there is no `compile_pipeline()`
+   to assert against on current main.
 
-   - `single_visible_device` flag: build a `PipelineConfig` with a
-     stage whose `factory_args["backend"] = "sglang"` and assert
-     `_build_stage_groups(...)` produces a `StageProcessSpec` with
-     `single_visible_device=True`; flip backend through
-     `runtime_overrides` and assert the flag still flips
-     (covers the `_resolve_factory_args` source rule).
-   - `get_stage_process_env` early return: spec with `tp_size=1,
-     single_visible_device=False` returns `{}`; same spec with the
-     flag flipped returns the remap env dict.
-   - `needs_mp` predicate: a single-stage / single-GPU /
-     `tp_size=1` config with `backend="sglang"` makes
-     `await launch_pipeline(...)` take the
-     `MultiProcessPipelineRunner` branch (assert by mocking the runner
-     constructor). The same config with `backend="local"` keeps the
-     `compile_pipeline()` branch.
-   - `compile_pipeline` reject: directly calling
-     `compile_pipeline(config_with_sglang_stage)` raises `ValueError`.
-   - **Signature-default trap regression test**: a StageConfig whose
-     `factory_args` does **not** contain a `backend` key, pointing at a
-     factory whose Python signature default is `"auto"`, must still
-     resolve to `"local"` at the launcher (i.e. `needs_mp` stays
-     False, `single_visible_device` stays False, `compile_pipeline`
-     does not raise). This locks the
-     [backend resolution contract](#backend-resolution-contract) and
-     prevents a future signature-default flip from silently bypassing
-     the CUDA isolation.
-   - **Real-factory signature lock**: `import inspect` and assert that
-     `inspect.signature(create_image_encoder_executor).parameters["backend"].default == "local"`
-     and the same for `create_audio_encoder_executor`. The previous
-     test only proves the resolver ignores signature defaults; this
-     one proves the actual production factories never have their
-     default flipped to `"auto"` or `"sglang"` by accident. Cheap to
-     run (no GPU, no model load, just `inspect`) and catches a
-     code-review miss directly.
-   - **TP preflight Layer 2 (encoder factory backend gate)**: build
-     a config where the `image_encoder` stage has `tp_size=2,
-     gpu=[0, 1], factory_args={}` (no backend), call
-     `_build_stage_groups` and assert it raises `ValueError`
-     mentioning the stage name. Then with
-     `factory_args={"backend": "auto"}` — also raises (auto can fall
-     back to local). Then with `factory_args={"backend": "sglang"}`
-     — succeeds. Locks Layer 2 of rule 6 in
-     [Required launcher change](#required-launcher-change).
-   - **TP preflight does NOT regress thinker TP**: build a config
-     where the `thinker` stage has `tp_size=2, gpu=[0, 1]` and no
-     `backend` in `factory_args` (its factory does not accept one,
-     but does accept `tp_rank/tp_size/nccl_port`).
-     `_build_stage_groups` must succeed. Locks Layer 1 of rule 6 —
-     proves the encoder reject is not over-broad.
+   - **`get_stage_process_env` unchanged at `tp_size=1`**: spec with
+     `tp_size=1` returns `{}` regardless of resolved backend (no
+     `single_visible_device` flag exists). spec with `tp_size>1`
+     returns the remap env dict as today. This locks the
+     "no env remap for tp_size=1, runner pins gpu_id directly"
+     contract.
    - **TP preflight Layer 1 (factory not TP-capable)**: build a
-     config where some non-encoder stage uses an existing SimpleScheduler
-     factory like `create_aggregate_executor` (no
-     `tp_rank/tp_size/nccl_port` in signature) and `tp_size=2`.
-     `_build_stage_groups` must raise
-     `ValueError` listing the missing parameters. This is the case
-     the previous single-layer preflight silently passed through to
-     subprocess spawn.
-   - **`compile_pipeline` rejects `tp_size > 1` directly**: call
-     `compile_pipeline(config_with_thinker_tp_size_2)` (no backend
-     parameter, regular thinker factory) and assert it raises
-     `ValueError`. This is the direct-call regression test — proves
-     a caller bypassing `serve/launcher.py` cannot silently downgrade
-     a TP config to single-rank.
+     config where a SimpleScheduler factory like
+     `create_aggregate_executor` (no `tp_rank/tp_size/nccl_port` in
+     signature) is configured with `tp_size=2`. `_build_stage_groups`
+     raises `ValueError` naming the missing parameters before any
+     spawn.
+   - **TP preflight does NOT regress thinker TP**: build a config
+     where the `thinker` stage has `tp_size=2` and no `backend` in
+     `factory_args` (`create_sglang_thinker_executor_from_config`
+     accepts `tp_rank/tp_size/nccl_port` but no `backend` parameter,
+     `sglang_omni/models/qwen3_omni/stages.py:870`).
+     `_build_stage_groups` succeeds. This locks the "Layer 2 only
+     applies to backend-aware factories" rule.
+   - **TP preflight Layer 2 (encoder factory backend gate)**: build
+     a config where `image_encoder` has `tp_size=2, gpu=[0, 1],
+     factory_args={}` (no backend). Assert `_build_stage_groups`
+     raises `ValueError`. Repeat with `factory_args={"backend":
+     "auto"}` — also raises. With `factory_args={"backend":
+     "sglang"}` — succeeds.
+   - **SGLang-backed process exclusivity (topology)**: build a
+     config with two stages declaring the same `stage.process` value
+     where at least one has resolved `backend="sglang"`.
+     `build_process_topology_plan` raises `ValueError` naming the
+     conflicting group. Variants: (a) two SGLang-backed stages
+     sharing a process, (b) one SGLang stage + one CPU sibling
+     (preprocessing / decode / aggregate) sharing a process. Both
+     must raise.
+   - **SGLang-backed process exclusivity (stage_group belt)**:
+     directly construct a `StageWorkerProcessSpec` containing both a
+     `backend="sglang"` stage and a sibling stage, bypassing the
+     topology builder. `_get_worker_process_env` raises
+     `AssertionError` naming the SGLang stage. Belt-and-suspenders
+     for callers that bypass topology.
+   - **`encoder_activation_budget_bytes` injection**: build a config
+     with `runtime.resources.encoder_activation_budget_bytes=N` and
+     a factory whose signature accepts that exact kwarg name. After
+     `resolve_stage_factory_args` runs, the resolved args contain
+     `encoder_activation_budget_bytes=N`. Variant: same field set
+     via `factory_args` or `runtime_overrides` — the unconditional
+     `reject_untyped_encoder_activation_budget_bytes` raises.
+   - **`StageResourceConfig` range check**: `StageResourceConfig(
+     encoder_activation_budget_bytes=0)` and `=-1` both raise from
+     `model_post_init`. `=None` and positive ints succeed.
+   - **Real-factory signature lock**: `import inspect` and assert
+     `inspect.signature(create_image_encoder_executor).parameters["backend"].default == "local"`
+     and the same for `create_audio_encoder_executor`. Also assert
+     the factory signature contains `encoder_activation_budget_bytes`
+     (not the shortened `activation_budget_bytes`) so the resolver
+     injection actually lands.
+   - **Parent-allocated `nccl_port`**: build a config with a
+     `backend="sglang", tp_size=1` encoder stage. After
+     `_build_stage_groups` runs, the resolved factory args for that
+     stage contain a non-None `nccl_port`. Variant: construct an
+     `SGLangEncoderRunner` directly with `nccl_port=None` — raises.
    - **Allocation-ready gather (mid-recv deadlock guard)**: run
      `EncoderScheduler` with `tp_size=2` and a fake `torch.empty` on
      the non-entry rank that raises on the **second** spec (so the first
@@ -3335,24 +3337,26 @@ Phase 2 — switch new deployments to the SGLang backend:
     (see [Backend resolution contract](#backend-resolution-contract)).
     Bumping the signature default would create the "launcher sees
     local, factory sees auto" mismatch that silently bypasses the
-    single-visible-device remap.
+    SGLang-backend topology checks (process exclusivity,
+    parent-allocated `nccl_port`, `encoder_activation_budget_bytes`
+    injection).
 
-    The launcher already sets `single_visible_device=True` whenever
-    resolved `backend in {"sglang", "auto"}` (Phase 0 step 1), so once
+    The TP preflight and process-exclusivity checks added in Phase 0
+    already fire on resolved `backend in {"sglang", "auto"}`, so once
     the templates explicitly carry `backend="auto"` the rest works.
 
     **Phase 2 unit test:** load the default Qwen3-Omni
     `PipelineConfig` (the one returned by the canonical builder /
     cookbook helper) and assert that the resolved
-    `_resolve_factory_args(image_encoder_stage, config).get("backend")`
+    `resolve_stage_factory_args(image_encoder_stage, config).get("backend")`
     is exactly `"auto"` — i.e. the value lives in `factory_args`, not
     in the factory signature. This is the only test that proves Phase
     2's flip actually crosses the launcher boundary.
 
-Phase 3 — clean up duplicated v1 encoder code:
+Phase 3 — clean up duplicated local encoder code:
 
 11. After at least one release with Phase 2 default, delete
-    `sglang_omni_v1/models/qwen3_omni/components/{image_encoder.py,audio_encoder.py}`
+    `sglang_omni/models/qwen3_omni/components/{image_encoder.py,audio_encoder.py}`
     and the corresponding HF tower instantiation in `stages.py`.
 
 Phase 4 — runtime parameter plumbing (out of scope for the first PR):
@@ -3740,20 +3744,14 @@ What this rule does **not** require:
   accounting handles that case).
 - Changing anything for `backend="local"` stages.
 
-The launcher predicate is the same shape as before:
-
-```python
-needs_mp = (
-    len(gpu_ids) > 1
-    or any_tp_stage(config)
-    or any_sglang_backend_stage(config)
-)
-```
-
-`compile_pipeline()` still rejects `backend="sglang"` (no per-process
-remap available in the single-process compile path) and any stage with
-`tp_size > 1` (no `tp_rank/tp_size/nccl_port` injection on the
-single-process path).
+The launcher is no longer gated by a `needs_mp` predicate:
+`sglang_omni/serve/launcher.py:212` constructs
+`MultiProcessPipelineRunner` unconditionally. There is no single-process
+compile branch on current main, so there is nothing to reject from.
+The reject responsibilities the earlier `compile_pipeline()` carried
+have moved to `_build_stage_groups` (TP preflight, parent-allocated
+`nccl_port`) and `build_process_topology_plan` (SGLang-backed process
+exclusivity).
 
 ## Progress Tracking
 

@@ -457,16 +457,31 @@ Backend rules:
 
 Launcher rules:
 
-- Any stage with resolved `backend in {"sglang", "auto"}` must run through
-  `MultiProcessPipelineRunner`, even when `tp_size=1`, so CUDA visibility and
-  distributed state are process-local.
-- Direct `compile_pipeline()` must reject SGLang-backed encoder stages and any
-  `tp_size > 1` stage, because the single-process path cannot inject TP rank
-  parameters.
-- TP preflight should reject factories that do not accept TP launch parameters.
-  Encoder TP also requires `backend="sglang"`.
-- The parent runner allocates an `nccl_port` for every SGLang-backed stage,
-  including `tp_size=1`; `SGLangEncoderRunner` rejects `nccl_port=None`.
+- The server entry (`sglang_omni/serve/launcher.py:212`) already routes
+  every pipeline through `MultiProcessPipelineRunner` unconditionally;
+  there is no longer a single-process compile branch to reject from.
+  `MultiProcessPipelineRunner.start()` calls
+  `prepare_pipeline_runtime`
+  (`sglang_omni/pipeline/runtime_config.py:78`), which builds the
+  placement plan and process-topology plan; per-process spawn is
+  driven by `_build_stage_groups`
+  (`sglang_omni/pipeline/mp_runner.py:37`). Encoder TP Phase 0
+  validation hooks into those three call sites instead of a
+  vanished `compile_pipeline()`.
+- TP preflight runs inside `_build_stage_groups` and rejects any
+  factory that does not accept `tp_rank/tp_size/nccl_port`. Encoder
+  TP additionally requires `backend="sglang"`, but only on
+  backend-aware factories — AR factories (thinker/talker) take TP
+  launch params without a `backend` parameter and must pass
+  preflight unchanged.
+- Process exclusivity for SGLang-backed stages is enforced in
+  `build_process_topology_plan`
+  (`sglang_omni/config/topology.py:36`): any process group that
+  contains a stage with resolved `backend in {"sglang", "auto"}`
+  must have exactly one member.
+- The parent runner allocates an `nccl_port` for every SGLang-backed
+  stage (including `tp_size=1`) inside `_build_stage_groups`;
+  `SGLangEncoderRunner` rejects `nccl_port=None`.
 
 ## Memory And Co-Location Contract
 
