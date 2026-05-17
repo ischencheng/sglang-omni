@@ -2330,6 +2330,21 @@ StageConfig(
 )
 ```
 
+> **OBSOLETE (2026-05-17).** The pipeline-config example above uses the
+> retracted top-level `memory=StageMemoryConfig(...)` field with the
+> short kwarg names `activation_budget_bytes` / `weight_budget_bytes`
+> / `relay_budget_bytes`. Phase 0 instead reuses PR #430's
+> `StageConfig.runtime.resources` with one new field
+> `encoder_activation_budget_bytes`. The current example shape is at
+> [New field on `StageResourceConfig`](#new-field-on-stageresourceconfig);
+> the injection rules are at
+> [Injection contract for `encoder_activation_budget_bytes`](#injection-contract-for-encoder_activation_budget_bytes).
+> The four paragraphs below describe the **superseded** design and
+> stay only for history. **Do not implement.** In particular, the
+> factory kwarg name is `encoder_activation_budget_bytes` (long form),
+> not `activation_budget_bytes` — the resolver matches the field name
+> exactly on signature.
+
 `StageMemoryConfig.activation_budget_bytes` is fed into encoder admission as
 `max_batch_cost`. `StageMemoryConfig.weight_budget_bytes` and
 `relay_budget_bytes` are consumed by the parent placement/memory planner before
@@ -2398,9 +2413,14 @@ def create_image_encoder_executor(
     nccl_port: int | None = None,
     max_batch_size: int = 32,
     max_batch_wait_ms: int = 50,
-    # Injected from StageMemoryConfig.activation_budget_bytes by the parent
-    # runner / resolved config path.
-    activation_budget_bytes: int | None = QWEN3_IMAGE_ENCODER_BATCH_BUDGET_BYTES,
+    # Injected by `resolve_stage_factory_args` from
+    # `StageConfig.runtime.resources.encoder_activation_budget_bytes`
+    # (see "Injection contract for encoder_activation_budget_bytes" at the
+    # end of this file). The kwarg name MUST be exactly
+    # `encoder_activation_budget_bytes` — the resolver matches the
+    # `runtime.resources` field name against the factory signature without
+    # alias remapping.
+    encoder_activation_budget_bytes: int | None = QWEN3_IMAGE_ENCODER_BATCH_BUDGET_BYTES,
     max_single_request_cost: int | None = None,
     server_args_overrides: dict[str, Any] | None = None,
     device: str = "cuda",
@@ -2428,7 +2448,7 @@ def create_image_encoder_executor(
             # cheap (no GPU work) since it runs on every inbox poll.
             request_cost_fn=adapter.request_cost_fn,
             batch_cost_fn=adapter.batch_cost_fn,
-            max_batch_cost=activation_budget_bytes,
+            max_batch_cost=encoder_activation_budget_bytes,
             max_single_request_cost=max_single_request_cost,
         )
     # Fallback: existing local-HF SimpleScheduler path, unchanged
@@ -2436,11 +2456,12 @@ def create_image_encoder_executor(
 ```
 
 The audio encoder factory follows the same shape with
-`Qwen3OmniAudioEncoderAdapter`, its own conservative cost model, and an
-audio-side `StageMemoryConfig.activation_budget_bytes`. The SGLang audio
-backend must not land with `request_cost_fn=0` / `max_batch_cost=None`: TP
-shards one forward's activations, but it does not prevent the scheduler from
-admitting an unbounded batch of long audio requests.
+`Qwen3OmniAudioEncoderAdapter`, its own conservative cost model, and the
+same `encoder_activation_budget_bytes` kwarg pulled from
+`runtime.resources`. The SGLang audio backend must not land with
+`request_cost_fn=0` / `max_batch_cost=None`: TP shards one forward's
+activations, but it does not prevent the scheduler from admitting an
+unbounded batch of long audio requests.
 
 ### Adapter `request_cost_fn`
 
@@ -3018,56 +3039,85 @@ addition that all sglang-backed encoder stages share.
 
 Phase 0 — landing path that doesn't break v1:
 
-1. **Launcher extension** (`sglang_omni_v1/pipeline/` + `sglang_omni_v1/serve/` + `sglang_omni_v1/config/`).
-   - Add `single_visible_device: bool = False` to `StageProcessSpec`
-     (`pipeline/stage_process.py`).
-   - In `MultiProcessPipelineRunner._build_stage_groups`
-     (`pipeline/mp_runner.py`), set the flag pre-spawn from the resolved
-     `base_factory_args.get("backend") in {"sglang", "auto"}` after
-     `_resolve_factory_args` has merged `runtime_overrides`.
-   - In `get_stage_process_env` (`pipeline/stage_process.py:222`),
-     change the early return to
-     `if spec.tp_size <= 1 and not spec.single_visible_device: return {}`.
-   - In `serve/launcher.py` (`launcher.py:141-150`), extend the
-     `needs_mp` predicate so any stage with resolved `backend in
-     {"sglang", "auto"}` forces `MultiProcessPipelineRunner`, even on a
-     single-GPU / `tp_size=1` pipeline. Without this the launcher
-     short-circuits to `compile_pipeline()` and the runner never gets
-     the per-process CUDA remap.
-   - In `config/compiler.py:compile_pipeline`, reject any stage with
-     resolved `backend in {"sglang", "auto"}` **or**
-     `stage_cfg.tp_size > 1`. The `tp_size > 1` reject is structural:
-     `compile_pipeline` never injects `tp_rank/tp_size/nccl_port`,
-     so any direct caller bypassing `serve/launcher.py` would silently
-     get a `tp_size=1` factory (thinker / talker / encoder all fail
-     this way). It does not regress normal serving because
-     `serve/launcher.py:149` routes any `tp_size > 1` to
+1. **Launcher extension** (`sglang_omni/pipeline/` + `sglang_omni/serve/` + `sglang_omni/config/`).
+   This list reflects the post-merge main state — do **not** use the
+   older `single_visible_device` / `_resolve_factory_args` /
+   `StageMemoryConfig` plan from the obsolete sections above.
+   - **Process exclusivity for SGLang-backend stages.** In
+     `_build_process_groups` (`sglang_omni/config/topology.py:65-80`),
+     when grouping non-TP stages by `stage.process`, validate that
+     any `ProcessGroupPlacement` containing a stage with resolved
+     `backend in {"sglang", "auto"}` has exactly one member. Raise
+     `ValueError` otherwise — sharing with another SGLang-backed
+     stage OR with a CPU sibling both crash on the second
+     `initialize_model_parallel` call.
+   - **Mirror exclusivity check in `_get_worker_process_env`**
+     (`sglang_omni/pipeline/stage_group.py:23-40`): fire the
+     existing assertion shape for any SGLang-backed stage too.
+     Belt-and-suspenders.
+   - **No CUDA env remap for `tp_size=1`.** `get_stage_process_env`
+     (`sglang_omni/pipeline/stage_process.py:292-319`) keeps its
+     existing `if spec.tp_size <= 1: return {}` early return.
+     SGLang-backed `tp_size=1` stages see the host's full CUDA
+     device list and pin `cuda_device` inside the runner from the
+     resolved `gpu_id` factory kwarg. The
+     `single_visible_device: bool` flag proposed in the obsolete
+     sections above is **not** added.
+   - **Launcher MP forcing.** In `serve/launcher.py`, extend the
+     `needs_mp` predicate so any stage with resolved
+     `backend in {"sglang", "auto"}` forces
+     `MultiProcessPipelineRunner`, even on a single-GPU / `tp_size=1`
+     pipeline. Without this the launcher short-circuits to
+     `compile_pipeline()` and the runner never gets its own process
+     for distributed init.
+   - **`compile_pipeline` reject.** In `sglang_omni/config/compiler.py`,
+     reject any stage with resolved `backend in {"sglang", "auto"}`
+     OR `stage_cfg.tp_size > 1`. The `tp_size > 1` reject is
+     structural: the single-process compile path never injects
+     `tp_rank/tp_size/nccl_port` and would silently downgrade. It
+     does not regress normal serving because the launcher's
+     `needs_mp` rule routes any `tp_size > 1` to
      `MultiProcessPipelineRunner` first.
-   - In `MultiProcessPipelineRunner._build_stage_groups`, run the
-     two-layer TP preflight from rule 6 of
-     [Required launcher change](#required-launcher-change) — Layer 1
-     rejects any TP stage whose factory does not accept
-     `tp_rank/tp_size/nccl_port`; Layer 2 rejects encoder TP stages
-     whose resolved backend is not `"sglang"`.
-   - Allocate an `nccl_port` for every SGLang-backed stage, including
-     `tp_size=1`, and pass it through `StageProcessSpec.factory_args`.
-     Production `SGLangEncoderRunner` rejects `nccl_port=None`.
-   - Add `StageMemoryConfig` resolution and per-physical-GPU aggregation in
-     the parent placement/memory planner. If an encoder rank is co-located
-     with a thinker rank, convert the encoder budget into the thinker
-     reserve before building the thinker's SGLang `ServerArgs`.
-   - In `MultiProcessPipelineRunner._monitor_children`, when
+   - **TP preflight.** In `MultiProcessPipelineRunner._build_stage_groups`,
+     run the two-layer preflight: Layer 1 rejects any TP stage whose
+     factory does not accept `tp_rank/tp_size/nccl_port`; Layer 2
+     rejects TP stages whose resolved backend is not `"sglang"` —
+     `backend="local"` or `"auto"` plus `tp_size > 1` cannot work.
+   - **Parent-allocated `nccl_port`.** Allocate an `nccl_port` for
+     every SGLang-backed stage, including `tp_size=1`, and pass it
+     through resolved `factory_args`. Production
+     `SGLangEncoderRunner` rejects `nccl_port=None`.
+   - **`runtime.resources.encoder_activation_budget_bytes` injection.**
+     Extend the existing `resolve_stage_factory_args`
+     (`sglang_omni/config/runtime.py:15`) — which already injects
+     `total_gpu_memory_fraction` from `runtime.resources` into matching
+     factory signatures — with the same shape for
+     `encoder_activation_budget_bytes`. Pair with an unconditional
+     `reject_untyped_encoder_activation_budget_bytes` guard
+     (mirrors `reject_untyped_total_gpu_memory_fraction` at
+     `runtime.py:58-72`): any value of this field in
+     `factory_args` / `runtime_overrides` raises. There is no
+     planner-side `StageMemoryConfig` aggregation step — PR #430's
+     runtime memory plumbing handles colocation by measurement
+     instead of pre-spawn aggregation (see
+     [Memory accounting reuses PR #430](#memory-accounting-reuses-pr-430)).
+   - **`StageResourceConfig.model_post_init` extension.** Add a
+     range check for `encoder_activation_budget_bytes` (positive int
+     or None) next to the existing `total_gpu_memory_fraction`
+     check at `sglang_omni/config/schema.py:59-64`.
+   - **`_monitor_children` fail-all.** In
+     `MultiProcessPipelineRunner._monitor_children`, when
      `StageGroup.any_dead()` reports a non-zero child exit, fail all
      active Coordinator futures / stream queues with a non-empty
      stage-group fatal error before `stop()` tears down the remaining
-     ranks. This is the required fatal path for `encode_batch()` faults:
-     the scheduler intentionally exits the process instead of attempting
-     an unsafe post-forward CPU gather.
+     ranks. Required for `encode_batch()` faults: the scheduler
+     intentionally exits the process instead of attempting an unsafe
+     post-forward CPU gather.
 
-   These Phase 0 launcher sub-steps are the load-bearing prerequisite for Phase 1's
-   `tp_size=1, gpu!=0` parity lane to validate the right thing — see
-   [GPU placement across `tp_size=1` and `tp_size>1` lanes](#gpu-placement-across-tp_size1-and-tp_size1-lanes)
-   and [Required launcher change](#required-launcher-change).
+   These Phase 0 launcher sub-steps are the load-bearing prerequisite
+   for Phase 1's `tp_size=1, gpu!=0` parity lane to validate the right
+   thing — see
+   [Launch path reconciliation with main](#launch-path-reconciliation-with-main).
 
    **Per-sub-step unit tests** (so each launcher change can be verified
    independently of the GPU lane in Phase 1):
@@ -3660,15 +3710,25 @@ parallel SGLang-backend check.
 
 Where the check belongs:
 
-- `_build_process_groups` (topology): when grouping stages by
-  `stage.process`, treat any SGLang-backend stage as its own
-  singleton group. Pre-spawn, raise `ValueError` if two
-  SGLang-backend stages declare the same `stage.process`, naming
-  both stages.
-- `_get_worker_process_env` (`stage_group.py`): extend the
-  exclusivity assertion to fire for `stage.factory_args["backend"] in
-  {"sglang", "auto"}` as well as `tp_size > 1`. Belt-and-suspenders
-  for callers that bypass the topology builder.
+- `_build_process_groups` (topology, `sglang_omni/config/topology.py:65-80`):
+  when grouping non-TP stages by `stage.process`, validate that any
+  `ProcessGroupPlacement` containing a stage with resolved
+  `backend in {"sglang", "auto"}` has **exactly one** member.
+  Equivalently: each SGLang-backed stage is its own singleton group.
+  Two SGLang-backend stages with the same `stage.process` raises;
+  one SGLang-backend stage plus any CPU sibling (preprocessing,
+  decode, aggregate) sharing the same `stage.process` **also**
+  raises. The check fires on `len(group) > 1` after grouping, not
+  on "two SGLang stages" — sharing with one local sibling is the
+  same crash path because the SGLang stage's distributed-init
+  globals (`_TP`, `_PP`, world group) live at module scope and
+  conflict with whatever the sibling brings into the process even
+  when the sibling never calls SGLang.
+- `_get_worker_process_env` (`stage_group.py:23-40`): extend the
+  exclusivity assertion to fire when any `spec.stage_specs[i]` has
+  resolved `backend in {"sglang", "auto"}` and
+  `len(spec.stage_specs) > 1`. Belt-and-suspenders for callers that
+  bypass the topology builder.
 
 What this rule does **not** require:
 

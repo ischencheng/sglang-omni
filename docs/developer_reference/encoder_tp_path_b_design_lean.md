@@ -309,8 +309,14 @@ process would hit that assertion and abort the process.
 
 Phase 0 rule: **any stage with `backend in {"sglang", "auto"}` must
 own its OS process exclusively**, regardless of `tp_size`. The
-topology builder must reject configs that assign two such stages to
-the same `process`. This rule sits next to the existing
+condition is "any process group containing a SGLang-backed stage has
+exactly one member" — sharing with another SGLang stage and sharing
+with a CPU sibling (preprocessing / decode / aggregate) are both
+rejected. The check fires on `len(group) > 1` after grouping, not on
+"two SGLang stages" specifically, because the SGLang stage's
+distributed-init globals (`_TP`, world group) conflict with whatever
+torch state the sibling brings into the process even when the
+sibling never calls SGLang. This rule sits next to the existing
 "TP stages must own their OS process exclusively" invariant in
 `stage_group.py:23-40`, and the placement planner enforces it
 pre-spawn.
@@ -534,6 +540,14 @@ Use these names in the Phase 0 implementation:
   configs that already reference `_executor`; the kept name does not
   block the SGLang code path because the factory body branches on
   `backend`.
+- The encoder admission kwarg the factory accepts is
+  `encoder_activation_budget_bytes` — the **full**
+  `runtime.resources` field name, not a shortened
+  `activation_budget_bytes`. `resolve_stage_factory_args` matches the
+  field name against the factory signature exactly (same shape PR #430
+  uses for `total_gpu_memory_fraction`); a shorter kwarg name would
+  silently fail to receive the injected value, leaving
+  `max_batch_cost=None` and the admission cap disabled.
 - `entry_rank` / `non_entry_rank` in new code; `entry rank` /
   `non-entry rank` in prose. Keep existing Stage `leader/follower` names only
   when discussing Stage process roles.
