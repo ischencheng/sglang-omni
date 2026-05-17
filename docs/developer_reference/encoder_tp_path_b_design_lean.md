@@ -6,13 +6,14 @@ Decision: SGLang-Omni should use SGLang main's native multimodal encoder
 implementations and inherit SGLang tensor parallelism, instead of maintaining
 separate encoder copies under `models/<name>/components/`.
 
-This lean draft keeps the RFC at the decision and contract level. Detailed
-Python sketches, per-key server-argument protection, and assertion-level test
-plans belong in Phase 0 PR code comments or a linked implementation tracking
-issue.
+This lean draft is the normative design contract for #375. Detailed Python
+sketches, per-key server-argument protection, and assertion-level test plans
+belong in Phase 0 PR code comments or non-normative implementation notes.
 
 For the detailed implementation notes behind these contracts, see
-[`encoder_tp_path_b_design.md`](encoder_tp_path_b_design.md).
+[`encoder_tp_path_b_design.md`](encoder_tp_path_b_design.md). If the two
+documents disagree, this lean RFC wins; the detailed file must be updated to
+match this contract before implementation.
 
 ## Motivation
 
@@ -160,6 +161,46 @@ After Phase 1 parity and fault-handling validation, we should propose an
 upstream helper such as `EncoderModelRunner` / partial encoder loader so future
 models can reuse the same submodule-loading contract directly from SGLang.
 
+For Qwen3-Omni concretely, this scopes the encoder GPU to ~2 GB (vision) or
+~0.5 GB (audio) instead of the full ~57 GB thinker LLM. The detailed RFC has
+the per-component sizing table and the partial-load pipeline:
+[`encoder_tp_path_b_design.md` → Weight Loading Scope](encoder_tp_path_b_design.md#weight-loading-scope).
+
+## Upstream Compatibility Contract
+
+Phase 0 may use a local `SGLangEncoderRunner` shim, but the shim has a bounded
+upstream dependency surface. Omni may depend on:
+
+- SGLang distributed setup: `init_distributed_environment`,
+  `initialize_model_parallel`, `initialize_dp_attention`, and `get_tp_group`.
+- SGLang config/load setup: `ServerArgs`, `ModelConfig.from_server_args`,
+  `LoadConfig`, and `get_model_loader`.
+- Qwen3-Omni encoder submodules and helpers:
+  `Qwen3OmniMoeVisionEncoder`, `Qwen3OmniMoeAudioEncoder`, and
+  `_get_feat_extract_output_lengths`.
+- TP-aware layers only through those upstream encoder submodules, not by
+  reimplementing or directly reaching into layer internals.
+
+The minimum signature contract is intentionally smaller than the upstream
+implementation:
+
+- Vision: construct a vision encoder from the thinker vision config, optional
+  quant config / prefix / norm epsilon, and call it with
+  `pixel_values, grid_thw`.
+- Audio: construct an audio encoder from the thinker audio config, call it with
+  `input_features, feature_lens`, and receive an object with
+  `last_hidden_state`.
+- Audio length: `_get_feat_extract_output_lengths(input_lengths)` returns the
+  post-encoder output lengths used to slice `audio_embeds`.
+
+Phase 0 compatibility is pinned to the SGLang commit/version exercised in CI.
+Tracking SGLang main is acceptable only if CI imports every allowed symbol,
+instantiates Qwen3-Omni image/audio encoder modules at `tp_size=1`, verifies
+partial loading only accepts declared prefixes, and runs adapter smoke tests
+that validate output shapes. If Phase 0 needs an upstream API outside this
+allowlist, it must either wrap it behind the local compatibility shim or first
+upstream a helper before depending on it directly.
+
 ## TP Input Fan-Out Contract
 
 The entry rank is the only rank whose Stage receives upstream data from ZMQ and
@@ -248,8 +289,8 @@ knobs such as `mem_fraction_static`, `max_running_requests`,
 Each SGLang-backed encoder stage provides an `EncoderAdapter`:
 
 - `encoder_specs`: declares encoder submodules and checkpoint prefixes.
-- `request_cost_fn(payload)`: estimates activation memory for admission
-  control.
+- `request_cost_fn(payload)` and, when additive costs are insufficient,
+  `batch_cost_fn(payloads)`: estimate activation memory for admission control.
 - `build_batch(messages)`: converts v1 payloads into a deterministic
   `BatchPlan` on every rank.
 - `run_feature(model, plan)`: invokes the upstream encoder submodule.
@@ -260,10 +301,37 @@ The adapter is model-specific shape glue. It must not catch broad `Exception`
 or return fake-success outputs such as empty tensors, zero tensors, or `None`
 when model execution failed.
 
+## Admission Contract
+
+Activation-budget admission is part of Phase 0 for both image/video and audio.
+It runs only on the entry rank before TP fan-out; non-entry ranks execute the
+already-admitted batch and never make independent admission decisions.
+
+- Image/video may use the existing additive visual cost model: raw pixel bytes
+  plus estimated visual output/deepstack bytes, multiplied by a calibrated
+  activation factor.
+- Audio must not use `request_cost_fn = 0` or `max_batch_cost = None` in the
+  SGLang backend. It needs a conservative audio budget from Phase 0.
+- Audio cost should be batch-aware because the input preparer right-pads
+  `input_features` and `feature_attention_mask` to the maximum time dimension
+  in the selected batch. A safe estimate includes padded input bytes, padded mask
+  bytes, output bytes from `_get_feat_extract_output_lengths`, and an activation
+  multiplier. The canonical formula and the Phase 0 multiplier default live in
+  the detailed RFC — see
+  [`encoder_tp_path_b_design.md` → Audio admission model](encoder_tp_path_b_design.md#audio-admission-model).
+- `request_cost_fn` and `batch_cost_fn` are invoked from the scheduler hot path
+  for every inbox poll. They must be **O(1) per request** and must not allocate
+  GPU memory or call into model code. Adapters compute their estimates from
+  CPU-side metadata (tensor shape/dtype, mask sums, HF config constants).
+- Single-request guards are separate from batch formation. A request whose audio
+  or visual cost exceeds the configured single-request cap fails before forward
+  instead of being admitted as a batch of one and OOMing inside TP collectives.
+
 ## Config Contract
 
-MVP requires no pipeline schema change. Encoder TP is expressed through
-existing `StageConfig` fields:
+MVP keeps the public pipeline topology unchanged, but Phase 0 adds a minimal
+stage memory declaration so co-located placement has a launch-time budget owner.
+Encoder TP is expressed through `StageConfig` plus `StageMemoryConfig`:
 
 ```python
 StageConfig(
@@ -273,8 +341,12 @@ StageConfig(
         "backend": "sglang",
         "max_batch_size": 32,
         "max_batch_wait_ms": 50,
-        "activation_budget_bytes": 20 * 1024**3,
     },
+    memory=StageMemoryConfig(
+        weight_budget_bytes=3 * 1024**3,
+        activation_budget_bytes=20 * 1024**3,
+        relay_budget_bytes=2 * 1024**3,
+    ),
     gpu=[0, 1],
     tp_size=2,
     next="mm_aggregate",
@@ -300,6 +372,57 @@ Launcher rules:
   parameters.
 - TP preflight should reject factories that do not accept TP launch parameters.
   Encoder TP also requires `backend="sglang"`.
+- The parent runner allocates an `nccl_port` for every SGLang-backed stage,
+  including `tp_size=1`; `SGLangEncoderRunner` rejects `nccl_port=None`.
+
+## Memory And Co-Location Contract
+
+Encoder and thinker ranks may share the same physical GPU in Phase 0. The budget
+owner is the pipeline placement/memory planner in the parent process, not the
+child runner and not SGLang AR's allocator.
+
+Before launch, the planner groups all stage ranks by physical GPU and sums:
+
+- AR thinker/talker weight, KV/static allocator budget.
+- Encoder declared weight budget.
+- Encoder activation budget used by admission control.
+- Relay/staging headroom.
+
+If the aggregate budget exceeds the target GPU budget, launch fails before any
+child process starts. When an encoder rank is co-located with a thinker rank,
+the planner converts the encoder-side budget into a thinker reserve and applies
+it to the SGLang AR `ServerArgs` before the thinker child initializes its memory
+pool. `weight_memory_fraction` is not an informational field in the V0 config;
+weight and activation budgets are explicit `StageMemoryConfig` inputs consumed
+by the parent planner.
+
+### Relation to `StageResourceConfig` (PR #430)
+
+PR #430 introduced `runtime.resources.StageResourceConfig` with a single
+`total_gpu_memory_fraction` field for the colocation RFC (issue #329). That
+field is a planner *input* — a per-stage cap as a fraction of total GPU memory.
+`StageMemoryConfig` is a planner *breakdown* — it splits the same budget into
+weight / activation / relay components so the planner can verify the sum fits
+and apply per-component reserves (e.g. encoder activation → thinker
+`mem_fraction_static` reserve).
+
+Both must coexist:
+
+- `runtime.resources.StageResourceConfig.total_gpu_memory_fraction` stays as
+  the public knob for fraction-based budgets (existing CLI compatibility).
+- `runtime.resources.memory: StageMemoryConfig | None` is the new typed
+  breakdown. When present, its byte fields are authoritative; the planner
+  ignores `total_gpu_memory_fraction` for that stage. When absent, the planner
+  falls back to the fraction-based cap with no per-component reserves.
+- If both are present and inconsistent (e.g. `total_gpu_memory_fraction = 0.30`
+  but the byte breakdown sums to a different fraction of the GPU's total
+  memory), the planner must raise at validation time rather than silently
+  picking one.
+
+Phase 0 encoder TP only adds `StageMemoryConfig` to encoder stages; thinker /
+talker / preprocessing stages keep their existing `StageResourceConfig` shape.
+Phase 4 extends `StageMemoryConfig` to other stages as part of the broader
+typed-runtime-override primitive.
 
 ## Naming
 
@@ -321,8 +444,13 @@ Phase 0:
 - Add Qwen3-Omni image/audio `EncoderAdapter`s.
 - Add `create_image_encoder_runner` and `create_audio_encoder_runner` with
   `backend="local"` as the default.
+- Add conservative image/video and audio activation admission, including
+  single-request guards.
+- Add `StageMemoryConfig` aggregation for co-located encoder + thinker launch.
 - Add launcher validation and single-visible-device handling for SGLang-backed
   encoder stages.
+- Allocate `nccl_port` in the parent for every SGLang-backed stage, including
+  `tp_size=1`, and reject missing ports in the runner.
 - Add fatal-path plumbing: a non-zero TP child exit tears down the stage group
   and fails all active Coordinator futures / stream queues with a non-empty
   error.
@@ -349,8 +477,12 @@ Phase 3:
 
 Minimum validation should cover:
 
+- Unit: upstream compatibility smoke for the allowlisted SGLang symbols and
+  Qwen3-Omni image/audio module signatures.
 - Unit: adapter batch planning, payload round-trip, skip/cache handling, and
-  activation-budget admission.
+  image/audio activation-budget admission.
+- Unit: co-located encoder + thinker memory aggregation applies the encoder
+  reserve to the thinker `ServerArgs` before launch.
 - Unit: TP metadata/tensor fan-out does not pickle tensor payload bytes and does
   not issue device broadcasts after allocation failure.
 - Unit: pre-forward failures emit request-level errors; forward-time TP faults
@@ -363,15 +495,14 @@ Minimum validation should cover:
 ## Open Questions
 
 1. What should the upstream partial encoder-submodule loader API look like
-   after Phase 1 validates the local SGLang-Omni implementation?
+   after Phase 1 validates the local SGLang-Omni compatibility shim?
 2. When upstream Qwen3-Omni encoder DP is complete, do we expose DP as a second
    parallelism axis or keep this RFC TP-only and add a separate DP design?
-3. How should future co-location memory accounting represent activation budget
-   versus weight memory fraction?
 
 ## Progress Tracking
 
-- [ ] Phase 0: land runner, scheduler, adapters, launcher validation.
+- [ ] Phase 0: land runner, scheduler, adapters, memory aggregation, launcher
+      validation.
 - [ ] Phase 1: local vs SGLang and tp1 vs tp2 parity.
 - [ ] Phase 2: opt selected Qwen3-Omni configs into `backend="auto"`.
 - [ ] Phase 3: remove duplicated local encoder code after one release.
