@@ -2706,6 +2706,28 @@ Internal TP traffic is owned by SGLang:
 
 ## Memory Accounting
 
+> **OBSOLETE (2026-05-17).** The "StageMemoryConfig + per-physical-GPU
+> planner aggregation + planned-available-bytes + readiness barrier"
+> design described in this section and its `### Schema location` /
+> `### Relation to PR #430` subsections is **not** implemented in
+> Phase 0. The current contract is:
+>
+> - One new field: `StageConfig.runtime.resources.encoder_activation_budget_bytes`
+>   (admission-only, fed into `EncoderScheduler.max_batch_cost`).
+> - Co-located encoder + thinker memory accounting reuses PR #430's
+>   runtime path in `SGLModelRunner._profile_available_bytes`
+>   (`sglang_omni/model_runner/sglang_model_runner.py:99-217`), which
+>   measures `total_memory * total_gpu_memory_fraction - process_used`
+>   at thinker load time. No planner-side aggregation, no readiness
+>   barrier, no `planned_available_bytes_after_encoder_load` formula.
+>
+> The current normative sections are
+> [Memory accounting reuses PR #430](#memory-accounting-reuses-pr-430),
+> [New field on `StageResourceConfig`](#new-field-on-stageresourceconfig),
+> and [Injection contract for `encoder_activation_budget_bytes`](#injection-contract-for-encoder_activation_budget_bytes).
+> The prose below stays for design-history context. **Do not
+> implement.**
+
 Encoder stages should not reuse AR `mem_fraction_static` semantics directly.
 For AR runners that controls KV cache allocation after weights load; for an
 encoder-only stage there is no KV pool, so the knob has no clean meaning. Phase
@@ -3381,10 +3403,15 @@ Phase 3 — clean up duplicated local encoder code:
 
 Phase 4 — runtime parameter plumbing (out of scope for the first PR):
 
-12. Generalize `StageMemoryConfig` into the broader typed,
-    stage-addressable override primitive Cheng called out in the v1 refactor
-    architecture doc. Phase 0 only needs the minimal memory fields required for
-    co-located encoder + thinker launch.
+12. Continue extending `StageRuntimeConfig` / `StageResourceConfig`
+    (`sglang_omni/config/schema.py:82-103`) — the typed
+    stage-addressable override primitive PR #430 already introduced —
+    with whatever runtime knobs subsequent encoder / co-location work
+    needs. Phase 0 only adds `encoder_activation_budget_bytes` to that
+    schema; later phases may add quantization config, batch-shape
+    overrides, etc. through the same `resolve_stage_factory_args`
+    injection shape. The retracted top-level `StageMemoryConfig` is
+    **not** the migration source — `StageResourceConfig` is.
 
 ## Validation
 
