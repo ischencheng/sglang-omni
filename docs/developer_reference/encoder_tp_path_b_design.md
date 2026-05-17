@@ -2418,11 +2418,28 @@ audio_batch_cost =
   * QWEN3_AUDIO_ENCODER_ACTIVATION_MULTIPLIER
 ```
 
-The adapter derives `audio_feature_lengths` from the CPU-side
-`audio_feature_lengths` tensor when present, or from `feature_attention_mask.sum`
-otherwise. It reads `num_mel_bins` and `output_dim` from the thinker
-`audio_config`, and it uses upstream `_get_feat_extract_output_lengths` for the
-output-length estimate.
+The adapter reads `audio_feature_lengths` directly from the payload. The
+preprocessor must populate this field on every audio request (it already does
+for the local v1 path, see `models/qwen3_omni/components/preprocessor.py`); if
+the field is missing on a payload reaching the SGLang admission path, the
+adapter raises a validation error — the scheduler cost path must **not** fall
+back to scanning `feature_attention_mask.sum()` on the hot path.
+
+This is a hard requirement of the
+[`request_cost_fn` performance contract](#adapter-request_cost_fn): cost
+functions must be O(1) per request and never touch tensor data. v1's local
+`_normalize_audio_request_tensors` (`stages.py:518-525`) currently falls back
+to `mask.sum(dim=1)` when `audio_feature_lengths` is missing, which is fine
+for the local SimpleScheduler path (called once per request before forward)
+but would be O(N² * audio_len) inside `_collect_batch_from_inbox`'s
+candidate-add loop. The SGLang admission path therefore **requires**
+`audio_feature_lengths` to be precomputed by the preprocessor; missing
+lengths are an error, not a fallback.
+
+`num_mel_bins` and `output_dim` come from the thinker `audio_config`, cached at
+adapter `__init__` time. `_get_feat_extract_output_lengths` is upstream's
+formula and is a constant-arithmetic function of the input length, so calling
+it per request is O(1).
 
 **Phase 0 multiplier default**: `QWEN3_AUDIO_ENCODER_ACTIVATION_MULTIPLIER = 5`
 — the same conservative value used by `QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER`
@@ -2535,10 +2552,12 @@ child process, it groups all stage ranks by physical GPU and sums:
 
 If the aggregate budget exceeds the target GPU budget, launch fails before any
 child process starts. When an encoder rank is co-located with a thinker rank,
-the planner converts the encoder-side reserve into a thinker-side reserve and
-applies it to the SGLang AR `ServerArgs` before the thinker initializes its KV
-pool. Existing code paths such as `apply_encoder_mem_reserve` are the bridge,
-but the source of truth is the per-physical-GPU aggregate in the parent planner.
+the planner reserves the encoder budget from the thinker `ServerArgs`
+according to whether the user has pinned `mem_fraction_static` — see
+[Interaction with user-pinned mem_fraction_static](#interaction-with-user-pinned-mem_fraction_static).
+The source of truth is the per-physical-GPU aggregate in the parent planner;
+`apply_encoder_mem_reserve` remains the runtime bridge but never overrides a
+user-pinned value silently.
 
 `StageMemoryConfig.activation_budget_bytes` is also plumbed into
 `EncoderScheduler` as `max_batch_cost`. Image/video use the additive visual
@@ -2550,47 +2569,100 @@ user override is still accepted for CLI compatibility, it must be converted into
 an explicit byte budget before launch and the converted byte budget is what the
 planner and scheduler consume.
 
-### Relation to `StageResourceConfig` (PR #430)
+### Schema location: where `StageMemoryConfig` lives
 
-PR #430 introduced `runtime.resources.StageResourceConfig` (under
-`sglang_omni_v1/config/runtime.py`) with a single `total_gpu_memory_fraction`
-field, driven by the colocation RFC (issue #329). That field is a planner
-**input** — a per-stage cap as a fraction of the GPU's total memory.
-`StageMemoryConfig` is a planner **breakdown** — it splits the same budget
-into weight / activation / relay components so:
+Phase 0 adds `memory` as a **top-level optional field on `StageConfig`**:
 
-1. the planner can verify the per-component sum fits the per-stage cap;
-2. the planner can apply per-component reserves (e.g. encoder activation →
-   thinker `mem_fraction_static` reserve);
-3. `EncoderScheduler` can pull `activation_budget_bytes` directly as
-   `max_batch_cost` without re-deriving a byte budget from a fraction at
-   spawn time.
+```python
+# sglang_omni_v1/config/schema.py
+class StageConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    factory: str
+    # ... existing fields ...
+    memory: StageMemoryConfig | None = None    # NEW
 
-The two coexist:
 
-| Field | Type | Authority | Purpose |
-|---|---|---|---|
-| `runtime.resources.total_gpu_memory_fraction` | `float \| None` | Existing (PR #430) | Fraction-based cap. CLI / config-file friendly. |
-| `runtime.resources.memory` | `StageMemoryConfig \| None` | New (this RFC) | Typed byte breakdown. Encoder stages must set this. |
+class StageMemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    weight_budget_bytes: int | None = None
+    activation_budget_bytes: int | None = None
+    relay_budget_bytes: int | None = None
+```
 
-Resolution rules:
+This is **not** nested under `runtime.resources`. The current
+`sglang_omni_v1/config/schema.py` is `extra="forbid"` and has no `runtime`
+field; there is no `sglang_omni_v1/config/runtime.py` module, and there is
+no `StageResourceConfig` class anywhere in v1 today. PR #430 implemented
+colocation memory plumbing inside the SGLang backend adapter, not on
+`StageConfig`. Phase 0 therefore adds `memory` directly on `StageConfig`
+rather than predicting a nested namespace that does not exist yet.
 
-- If `memory` is present, the planner uses its byte fields as authoritative.
-  `total_gpu_memory_fraction` becomes informational on that stage.
-- If `memory` is absent, the planner falls back to
-  `total_gpu_memory_fraction` for cap enforcement, with **no per-component
-  reserves** for that stage. AR stages (thinker / talker) keep this shape in
-  Phase 0.
-- If both are present and the byte sum implied by `memory` does not match
-  `total_gpu_memory_fraction * total_gpu_memory_bytes` within a small
-  tolerance (e.g. 1%), the planner raises at validation time. Phase 0 must
-  not silently pick one over the other.
+If a future RFC (e.g. the Phase 4 typed-runtime-override primitive)
+introduces `StageConfig.runtime: StageRuntimeConfig` and moves `memory`
+under it, the migration is non-breaking: `StageConfig.memory` becomes a
+deprecated alias for `runtime.resources.memory` for one release. Phase 0
+must not pre-commit to that nesting.
 
-Phase 0 only adds `StageMemoryConfig` to the two encoder stages.
-Thinker / talker / preprocessing stages keep their existing
-`StageResourceConfig` shape from PR #430 unchanged. Phase 4 generalizes
-`StageMemoryConfig` across all stages as part of the broader typed
-stage-runtime override primitive.
+### Relation to PR #430 colocation memory work
+
+PR #430 implemented the runtime bridge for co-located encoder + thinker
+memory accounting **inside the SGLang backend adapter**, not on
+`StageConfig`. The current bridge:
+
+- `apply_encoder_mem_reserve` (`sglang_omni/engines/ar/sglang_backend/server_args_builder.py:39-68`)
+  subtracts an encoder reserve from SGLang's **auto-picked**
+  `mem_fraction_static`.
+- `create_sglang_thinker_executor_from_config` (`sglang_omni/models/qwen3_omni/pipeline/stages.py:406`)
+  invokes the reserve **only when the user has not pinned**
+  `mem_fraction_static`. If the user pins it, the reserve is skipped.
+
+Phase 0 encoder TP adds the **planner-side input** — `StageConfig.memory` —
+that this bridge currently lacks. Without it, the bridge has no canonical
+source for the encoder reserve and has to guess from auto-allocation
+behaviour.
+
+#### Interaction with user-pinned `mem_fraction_static`
+
+This is the load-bearing rule the RFC must pin down, because the current
+bridge silently skips the reserve when the user pins
+`mem_fraction_static` (`server_args_builder.py:33-34` writes the user value
+in; the auto-fraction reserve in `:43-46` only runs on `None`). Without an
+explicit rule, a user who pins `mem_fraction_static=0.85` next to a
+co-located encoder budget gets neither side honoured: the thinker takes
+0.85, the encoder gets nothing reserved, encoder forward OOMs.
+
+Phase 0 rule:
+
+1. **User-pinned + co-located encoder → planner validates, never silently
+   overrides.** If `mem_fraction_static` is pinned via factory args / CLI /
+   `runtime_overrides` and the planner has a co-located encoder reserve on
+   the same physical GPU, the planner checks
+   `(1 - mem_fraction_static) * total_gpu_bytes >= encoder_reserve_bytes`
+   before any child spawns. If the inequality fails, launch raises a
+   `ValueError` naming both stages and showing the numbers.
+2. **No user pin + co-located encoder → planner applies the reserve via
+   the existing bridge.** `StageConfig.memory.{weight_budget_bytes,
+   activation_budget_bytes}` for the co-located encoder are summed,
+   converted to a fraction of total GPU memory, and passed into
+   `apply_encoder_mem_reserve` (or its successor). The thinker's auto-picked
+   `mem_fraction_static` is reduced accordingly.
+3. **No co-located encoder → bridge is a no-op.** The thinker either uses
+   the user-pinned `mem_fraction_static` or SGLang's auto value, unchanged.
+
+The planner never silently overrides a user-pinned `mem_fraction_static`.
+Conflicts surface as validation errors at compile / `_build_stage_groups`
+time, before any subprocess spawns.
+
+#### Future migration
+
+PR #430 may later move its bridge logic into a planner-owned reserve
+calculation (i.e. the planner produces a final `mem_fraction_static` for the
+thinker stage, and `apply_encoder_mem_reserve` becomes a thin shim that
+just trusts the planner output). When that happens, the rules above
+collapse to: planner is the single source of truth, the bridge does nothing
+on its own. The contract in this section describes the rules during the
+transition.
 
 ## Fallback For Encoders Not Upstreamed
 

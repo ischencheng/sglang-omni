@@ -322,7 +322,13 @@ already-admitted batch and never make independent admission decisions.
 - `request_cost_fn` and `batch_cost_fn` are invoked from the scheduler hot path
   for every inbox poll. They must be **O(1) per request** and must not allocate
   GPU memory or call into model code. Adapters compute their estimates from
-  CPU-side metadata (tensor shape/dtype, mask sums, HF config constants).
+  CPU-side metadata: tensor shape/dtype/numel, HF config constants, and
+  preprocessor-populated length fields. **Adapters must not scan tensor data
+  on the hot path** — e.g. audio admission must read
+  `audio_feature_lengths` from the payload (which the preprocessor is
+  required to populate) instead of falling back to
+  `feature_attention_mask.sum()`. A missing length is a validation error,
+  not a fallback.
 - Single-request guards are separate from batch formation. A request whose audio
   or visual cost exceeds the configured single-request cap fails before forward
   instead of being admitted as a batch of one and OOMing inside TP collectives.
@@ -390,39 +396,65 @@ Before launch, the planner groups all stage ranks by physical GPU and sums:
 
 If the aggregate budget exceeds the target GPU budget, launch fails before any
 child process starts. When an encoder rank is co-located with a thinker rank,
-the planner converts the encoder-side budget into a thinker reserve and applies
-it to the SGLang AR `ServerArgs` before the thinker child initializes its memory
-pool. `weight_memory_fraction` is not an informational field in the V0 config;
+the planner reserves the encoder budget from the thinker `ServerArgs` according
+to whether the user has pinned `mem_fraction_static` (see
+[Relation to PR #430](#relation-to-pr-430-colocation-memory-work)).
+`weight_memory_fraction` is not an informational field in the V0 config;
 weight and activation budgets are explicit `StageMemoryConfig` inputs consumed
 by the parent planner.
 
-### Relation to `StageResourceConfig` (PR #430)
+### Schema location: where `StageMemoryConfig` lives
 
-PR #430 introduced `runtime.resources.StageResourceConfig` with a single
-`total_gpu_memory_fraction` field for the colocation RFC (issue #329). That
-field is a planner *input* — a per-stage cap as a fraction of total GPU memory.
-`StageMemoryConfig` is a planner *breakdown* — it splits the same budget into
-weight / activation / relay components so the planner can verify the sum fits
-and apply per-component reserves (e.g. encoder activation → thinker
-`mem_fraction_static` reserve).
+`StageMemoryConfig` is a new top-level field on `StageConfig`:
 
-Both must coexist:
+```python
+class StageConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    factory: str
+    # ... existing fields ...
+    memory: StageMemoryConfig | None = None   # NEW
+```
 
-- `runtime.resources.StageResourceConfig.total_gpu_memory_fraction` stays as
-  the public knob for fraction-based budgets (existing CLI compatibility).
-- `runtime.resources.memory: StageMemoryConfig | None` is the new typed
-  breakdown. When present, its byte fields are authoritative; the planner
-  ignores `total_gpu_memory_fraction` for that stage. When absent, the planner
-  falls back to the fraction-based cap with no per-component reserves.
-- If both are present and inconsistent (e.g. `total_gpu_memory_fraction = 0.30`
-  but the byte breakdown sums to a different fraction of the GPU's total
-  memory), the planner must raise at validation time rather than silently
-  picking one.
+This is **not** nested under `runtime.resources`. v1's current
+`StageConfig` (`sglang_omni_v1/config/schema.py`) has `extra="forbid"` and
+no `runtime` / `resources` field; the colocation work in PR #430 added
+adapter-level memory plumbing inside the SGLang backend, but it did **not**
+introduce a `runtime.resources.StageResourceConfig` field on `StageConfig`.
+Phase 0 therefore adds `memory` as a top-level optional field directly on
+`StageConfig` rather than inventing a nested namespace that does not exist
+yet.
 
-Phase 0 encoder TP only adds `StageMemoryConfig` to encoder stages; thinker /
-talker / preprocessing stages keep their existing `StageResourceConfig` shape.
-Phase 4 extends `StageMemoryConfig` to other stages as part of the broader
-typed-runtime-override primitive.
+If a future RFC (e.g. the broader typed-runtime-override primitive in Phase 4
+of this design) introduces `StageConfig.runtime: StageRuntimeConfig` and
+wants to relocate `memory` under it, that is a non-breaking move:
+`StageConfig.memory` can become a deprecated alias for `runtime.resources.memory`
+during one release. Phase 0 must not predict that nesting.
+
+### Relation to PR #430 colocation memory work
+
+PR #430 implemented the colocation memory plumbing in the SGLang backend
+adapter (`apply_encoder_mem_reserve`, `mem_fraction_static` reservation logic
+inside `create_sglang_thinker_executor_from_config`). The bridge currently
+lives inside the thinker stage factory, not on `StageConfig`. Phase 0 encoder
+TP adds the missing **planner-side** input — `StageConfig.memory` — that the
+PR #430 bridge can read instead of probing SGLang auto-allocation behaviour.
+
+Interaction with user-set `mem_fraction_static`:
+
+- If the user pins `mem_fraction_static` via factory args / CLI **and** the
+  planner has a co-located encoder reserve for the same GPU, the planner
+  must **validate** that the pinned value already leaves room for the
+  encoder reserve. If `(1 - mem_fraction_static) * total_gpu_bytes` is less
+  than the encoder reserve required by `StageMemoryConfig` on the same GPU,
+  launch fails with a `ValueError` naming both stages.
+- If the user does not pin `mem_fraction_static`, the planner reads
+  `StageMemoryConfig.weight_budget_bytes + activation_budget_bytes` for the
+  co-located encoder, converts to a fraction of total GPU memory, and
+  subtracts from SGLang's auto-selected `mem_fraction_static` via the
+  existing `apply_encoder_mem_reserve` path.
+- The planner never silently overrides a user-pinned `mem_fraction_static`.
+  Conflicts surface as validation errors before any child process spawns.
 
 ## Naming
 
