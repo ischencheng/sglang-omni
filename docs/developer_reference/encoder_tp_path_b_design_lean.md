@@ -335,23 +335,35 @@ already-admitted batch and never make independent admission decisions.
 
 ## Config Contract
 
-MVP keeps the public pipeline topology unchanged, but Phase 0 adds a minimal
-stage memory declaration so co-located placement has a launch-time budget owner.
-Encoder TP is expressed through `StageConfig` plus `StageMemoryConfig`:
+Encoder TP reuses the existing typed `StageRuntimeConfig` /
+`StageResourceConfig` shape introduced for colocation (PR #430,
+`sglang_omni/config/schema.py:45-103`). Phase 0 adds one
+admission-only field — `encoder_activation_budget_bytes` —
+under `runtime.resources`. It does **not** introduce a new
+top-level `StageMemoryConfig`:
 
 ```python
 StageConfig(
     name="image_encoder",
-    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_runner",
+    factory="sglang_omni.models.qwen3_omni.stages.create_image_encoder_runner",
     factory_args={
         "backend": "sglang",
         "max_batch_size": 32,
         "max_batch_wait_ms": 50,
     },
-    memory=StageMemoryConfig(
-        weight_budget_bytes=3 * 1024**3,
-        activation_budget_bytes=20 * 1024**3,
-        relay_budget_bytes=2 * 1024**3,
+    runtime=StageRuntimeConfig(
+        resources=StageResourceConfig(
+            # Existing field (PR #430): per-rank cap as a fraction of total
+            # physical GPU memory. Drives co-location admission and AR
+            # `_profile_available_bytes_from_process_memory`.
+            total_gpu_memory_fraction=0.20,
+            # NEW (this RFC): encoder-only admission cap, in bytes. Drives
+            # `EncoderScheduler.max_batch_cost` (image / video / audio
+            # activation peaks). Independent of `total_gpu_memory_fraction`
+            # because admission caps batch size by activation footprint,
+            # not by static allocator budget.
+            encoder_activation_budget_bytes=20 * 1024**3,
+        ),
     ),
     gpu=[0, 1],
     tp_size=2,
@@ -359,13 +371,23 @@ StageConfig(
 )
 ```
 
-`activation_budget_bytes` declaration is single-sourced from
-`StageMemoryConfig`. The factory-args resolver injects it as a factory
-kwarg after merging `factory_args` + `runtime_overrides`. If
-`activation_budget_bytes` also appears in either of those, resolution
-fails with a `ValueError` — admission cap and planner budget must not
-diverge silently. The detailed RFC has the resolver-side sketch:
-[`encoder_tp_path_b_design.md` → Injection contract for `activation_budget_bytes`](encoder_tp_path_b_design.md#injection-contract-for-activation_budget_bytes).
+The factory-args resolver (`sglang_omni/config/runtime.py:resolve_stage_factory_args`)
+already injects `total_gpu_memory_fraction` into the factory signature
+after merging `factory_args` + `runtime_overrides`, and Phase 0 extends
+it with the same shape for `encoder_activation_budget_bytes`:
+
+- If the resolved factory has `encoder_activation_budget_bytes` in its
+  signature, inject `runtime.resources.encoder_activation_budget_bytes`
+  as that kwarg (or `activation_budget_bytes` — the factory uses the
+  shorter name; the resolver adapts).
+- If `factory_args` / `runtime_overrides` already set the kwarg, fail
+  with a `ValueError` pointing at both sources — admission cap is
+  single-sourced from `runtime.resources` exactly like
+  `total_gpu_memory_fraction` is today (`runtime.py:reject_untyped_total_gpu_memory_fraction`).
+
+See the detailed RFC for the resolver-side sketch and the rejection
+rule:
+[`encoder_tp_path_b_design.md` → Injection contract for `encoder_activation_budget_bytes`](encoder_tp_path_b_design.md#injection-contract-for-encoder_activation_budget_bytes).
 
 Backend rules:
 
@@ -391,94 +413,61 @@ Launcher rules:
 
 ## Memory And Co-Location Contract
 
-Encoder and thinker ranks may share the same physical GPU in Phase 0. The budget
-owner is the pipeline placement/memory planner in the parent process, not the
-child runner and not SGLang AR's allocator.
+Encoder and thinker ranks may share the same physical GPU in Phase 0.
+PR #430 already implemented the runtime mechanism: each stage declares
+`runtime.resources.total_gpu_memory_fraction`, and
+`SGLModelRunner._profile_available_bytes` computes KV headroom as
+`total_memory * fraction - process_used` for colocated AR stages
+(`sglang_omni/model_runner/sglang_model_runner.py:99-141`,
+`sglang_omni/utils/gpu_memory.py`). The runner picks one of three paths
+at load time:
 
-Before launch, the planner groups all stage ranks by physical GPU and sums:
+- NVML process-scoped accounting when host PID visibility allows it
+  (preferred);
+- a serialized stage-load delta under the same-GPU startup lock when
+  NVML cannot identify the current process;
+- upstream SGLang free-memory-delta accounting when no
+  `total_gpu_memory_fraction` is set (non-colocated path).
 
-- AR thinker/talker weight, KV/static allocator budget.
-- Encoder declared weight budget.
-- Encoder activation budget used by admission control.
-- Relay/staging headroom.
+This RFC reuses that mechanism unchanged. The encoder Phase 0 work
+adds **only**:
 
-If the aggregate budget exceeds the target GPU budget, launch fails before any
-child process starts. When an encoder rank is co-located with a thinker rank,
-the planner reserves the encoder budget from the thinker `ServerArgs` according
-to whether the user has pinned `mem_fraction_static` (see
-[Relation to PR #430](#relation-to-pr-430-colocation-memory-work)).
-`weight_memory_fraction` is not an informational field in the V0 config;
-weight and activation budgets are explicit `StageMemoryConfig` inputs consumed
-by the parent planner.
+1. Encoder stages declare `runtime.resources.total_gpu_memory_fraction`
+   the same way thinker / talker do today. The planner sums per-GPU
+   budgets, rejects over-allocation pre-spawn (existing PR #430 logic
+   in `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`).
+2. Encoder stages declare a separate
+   `runtime.resources.encoder_activation_budget_bytes` for
+   `EncoderScheduler.max_batch_cost`. This is admission control for
+   batch *formation*; it has no relation to weight footprint or
+   `mem_fraction_static`, so it must be a distinct field rather than a
+   derived fraction.
 
-### Schema location: where `StageMemoryConfig` lives
-
-`StageMemoryConfig` is a new top-level field on `StageConfig`:
-
-```python
-class StageConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    factory: str
-    # ... existing fields ...
-    memory: StageMemoryConfig | None = None   # NEW
-```
-
-This is **not** nested under `runtime.resources`. v1's current
-`StageConfig` (`sglang_omni_v1/config/schema.py`) has `extra="forbid"` and
-no `runtime` / `resources` field; the colocation work in PR #430 added
-adapter-level memory plumbing inside the SGLang backend, but it did **not**
-introduce a `runtime.resources.StageResourceConfig` field on `StageConfig`.
-Phase 0 therefore adds `memory` as a top-level optional field directly on
-`StageConfig` rather than inventing a nested namespace that does not exist
-yet.
-
-If a future RFC (e.g. the broader typed-runtime-override primitive in Phase 4
-of this design) introduces `StageConfig.runtime: StageRuntimeConfig` and
-wants to relocate `memory` under it, that is a non-breaking move:
-`StageConfig.memory` can become a deprecated alias for `runtime.resources.memory`
-during one release. Phase 0 must not predict that nesting.
-
-### Relation to PR #430 colocation memory work
-
-PR #430 implemented the colocation memory plumbing in the SGLang backend
-adapter (`apply_encoder_mem_reserve`, `mem_fraction_static` reservation logic
-inside `create_sglang_thinker_executor_from_config`). The bridge currently
-lives inside the thinker stage factory, not on `StageConfig`. Phase 0 encoder
-TP adds the missing **planner-side** input — `StageConfig.memory` — that the
-PR #430 bridge can read instead of probing SGLang auto-allocation behaviour.
-
-Load-order assumption (Phase 0): on each physical GPU, all co-located
-encoder ranks reach ready before any AR (thinker / talker) rank on that
-GPU runs `init_memory_pool`. The planner enforces this with a per-GPU
-readiness barrier. The base memory the thinker sees at load time is then
-deterministic: `total_gpu_bytes - Σ co-located encoder resident bytes`.
-
-This matters because upstream SGLang computes the KV reserve as
-`(1 - mem_fraction_static) * pre_model_load_memory`
-(`model_runner_kv_cache_mixin.py:69`), not as a fraction of physical total
-VRAM. A validator that bases on `total_gpu_bytes` will pass cases SGLang
-later rejects.
+There is no new `StageMemoryConfig`, no per-GPU readiness barrier
+between encoder and AR, no `planned_available_bytes_after_encoder_load`
+formula, and no planner-side `mem_fraction_static` reservation logic.
+PR #430's `_profile_available_bytes_from_process_memory` reads the
+*actual* process-scoped memory at load time, so it handles spawn /
+load-order non-determinism by measurement rather than by enforcement.
+The encoder runner is a regular colocated AR-class process from the
+runtime's point of view.
 
 Interaction with user-set `mem_fraction_static`:
 
-- If the user pins `mem_fraction_static` via factory args / CLI **and** the
-  planner has a co-located encoder reserve for the same GPU, the planner
-  validates against the planned-available base after encoder load:
-  `(1 - mem_fraction_static) * (total_gpu_bytes - encoder_resident_bytes)`
-  must be `>= encoder_activation_reserve_bytes`. If not, launch fails
-  with a `ValueError` naming both stages.
-- If the user does not pin `mem_fraction_static`, the planner computes the
-  encoder activation reserve as a fraction of the same planned-available
-  base and passes the delta into `apply_encoder_mem_reserve`. Encoder
-  weight bytes are already resident before the thinker loads, so they do
-  not need a separate reserve.
-- The planner never silently overrides a user-pinned `mem_fraction_static`.
-  Conflicts surface as validation errors before any child process spawns.
+PR #430 already routes `mem_fraction_static` through
+`runtime.sglang_server_args.mem_fraction_static`
+(`sglang_omni/config/schema.py:67-79`). The encoder runner does not
+own a KV pool, so it does not set this field. If a user pins
+`mem_fraction_static` on the *thinker* stage, the existing PR #430
+adapter applies the pin verbatim and skips the auto-fraction
+`apply_encoder_mem_reserve` path. The encoder runner's
+`total_gpu_memory_fraction` is independent — it bounds the encoder's
+own process_used and does not interact with the thinker's KV reserve
+arithmetic.
 
-The detailed RFC has the full derivation of why `total_gpu_bytes` alone is
-the wrong base and how the per-GPU readiness barrier is implemented; see
-[`encoder_tp_path_b_design.md` → Interaction with user-pinned `mem_fraction_static`](encoder_tp_path_b_design.md#interaction-with-user-pinned-mem_fraction_static).
+See [`encoder_tp_path_b_design.md` → Memory accounting reuses PR #430](encoder_tp_path_b_design.md#memory-accounting-reuses-pr-430)
+for the line-by-line walk through `SGLModelRunner._profile_available_bytes`
+and the deletion of the obsolete planner-side reserve plumbing.
 
 ## Naming
 
@@ -502,9 +491,19 @@ Phase 0:
   `backend="local"` as the default.
 - Add conservative image/video and audio activation admission, including
   single-request guards.
-- Add `StageMemoryConfig` aggregation for co-located encoder + thinker launch.
-- Add launcher validation and single-visible-device handling for SGLang-backed
-  encoder stages.
+- Add `runtime.resources.encoder_activation_budget_bytes` field on
+  `StageResourceConfig` (admission-only; reuse PR #430's
+  `total_gpu_memory_fraction` for placement-side budgeting).
+- Extend `resolve_stage_factory_args` to inject the new field and reject
+  duplicates in `factory_args` / `runtime_overrides`, using the same shape
+  as the existing `total_gpu_memory_fraction` injection.
+- Add launcher validation for SGLang-backed encoder stages. CUDA env remap
+  reuses the existing TP-only path (`get_stage_process_env` already returns
+  `{}` for `tp_size <= 1`); a `backend="sglang", tp_size=1` encoder still
+  goes through `MultiProcessPipelineRunner` for distributed init but does
+  not get the `CUDA_VISIBLE_DEVICES=<one>` remap — instead the runner pins
+  `cuda_device` to its assigned `gpu_id` directly (see detailed RFC for the
+  reconciled launch path).
 - Allocate `nccl_port` in the parent for every SGLang-backed stage, including
   `tp_size=1`, and reject missing ports in the runner.
 - Add fatal-path plumbing: a non-zero TP child exit tears down the stage group
