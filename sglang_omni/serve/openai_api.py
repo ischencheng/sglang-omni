@@ -52,6 +52,7 @@ from sglang_omni.serve.protocol import (
 
 logger = logging.getLogger(__name__)
 MIME_TO_FORMAT = {mime: fmt for fmt, mime in FORMAT_MIME_TYPES.items()}
+
 _BAD_REQUEST_MARKERS = (
     "longer than the model's context length",
     "Requested token count exceeds the model's maximum context length",
@@ -59,12 +60,6 @@ _BAD_REQUEST_MARKERS = (
 
 
 def _is_bad_request_error(exc: Exception) -> bool:
-    # TODO (Qiujiang): replace with structured error code.
-    # Worker → coordinator currently serializes exceptions to str, so
-    # 400 vs 500 must be recovered via phrase match. See Ccyest's proposal
-    # on #330 for the end-to-end design (CompleteMessage.error_code).
-    # These markers must stay in sync with SGLang's ValueError wording:
-    #   - managers/tokenizer_manager.py:761, 791
     message = str(exc)
     return any(marker in message for marker in _BAD_REQUEST_MARKERS)
 
@@ -162,7 +157,6 @@ def _register_chat_completions(app: FastAPI) -> None:
             audio_format = req.audio.get("format", "wav")
 
         if req.stream:
-            # TODO (Qiujiang): Align streaming bad-request behavior with upstream SGLang.
             return StreamingResponse(
                 _chat_stream(
                     client,
@@ -206,14 +200,14 @@ async def _chat_non_stream(
             request_id=request_id,
             audio_format=audio_format,
         )
-    except RuntimeError as exc:
+    except ClientError as exc:
         if _is_bad_request_error(exc):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except ClientError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Error generating response for request %s", request_id)
+        if _is_bad_request_error(exc):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     requested_modalities = req.modalities or ["text"]
@@ -431,12 +425,24 @@ def _build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     if req.video_total_pixels is not None:
         metadata["video_total_pixels"] = req.video_total_pixels
 
+    extra_params: dict[str, Any] = {}
+    for field_name, value in (
+        ("talker_temperature", req.talker_temperature),
+        ("talker_top_p", req.talker_top_p),
+        ("talker_top_k", req.talker_top_k),
+        ("talker_repetition_penalty", req.talker_repetition_penalty),
+        ("talker_max_new_tokens", req.talker_max_new_tokens),
+    ):
+        if value is not None:
+            extra_params[field_name] = value
+
     return GenerateRequest(
         model=req.model,
         messages=messages,
         sampling=sampling,
         stage_sampling=stage_sampling,
         stage_params=req.stage_params,
+        extra_params=extra_params,
         stream=req.stream,
         max_tokens=req.effective_max_tokens,
         output_modalities=output_modalities,
@@ -550,10 +556,16 @@ async def _speech_stream(
             yield f"data: {json.dumps(payload)}\n\n"
             chunk_index += 1
     except ClientError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload = _speech_stream_error_payload(request_id, chunk_index, exc)
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
     except Exception as exc:
         logger.exception("Error streaming speech for request %s", request_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload = _speech_stream_error_payload(request_id, chunk_index, exc)
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     final_payload = {
         "id": f"speech-{request_id}",
@@ -565,6 +577,24 @@ async def _speech_stream(
     }
     yield f"data: {json.dumps(final_payload)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def _speech_stream_error_payload(
+    request_id: str,
+    chunk_index: int,
+    exc: Exception,
+) -> dict[str, Any]:
+    return {
+        "id": f"speech-{request_id}",
+        "object": "audio.speech.chunk",
+        "index": chunk_index,
+        "audio": None,
+        "finish_reason": "error",
+        "error": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+    }
 
 
 def _select_speech_audio_delta(
@@ -583,8 +613,6 @@ def _select_speech_audio_delta(
             audio = audio[:, 0]
 
     total_samples = int(audio.shape[-1]) if audio.ndim else 0
-    if total_samples == 0:
-        return None, emitted_samples
     if not is_terminal:
         return audio, emitted_samples + total_samples
     if total_samples <= emitted_samples:

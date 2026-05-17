@@ -28,6 +28,7 @@ from benchmarks.metrics.wer import print_wer_summary
 from tests.utils import (
     ServerHandle,
     apply_slack,
+    apply_wer_slack,
     assert_speed_thresholds,
     assert_wer_partitioned,
 )
@@ -36,20 +37,19 @@ CONCURRENCY = 8
 MAX_SAMPLES = 10
 MAX_TOKENS = 256
 
-# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/382#issuecomment-4366925373
-# Relaxed in V1 refactor: v0=0.5 → v1=0.4.
 VIDEOAMME_TALKER_THINKER_TEXT_MIN_ACCURACY = 0.4
-# Relaxed in V1 refactor: v0=0.015 → v1=0.02.
-VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX = 0.01
-# Relaxed in V1 refactor: v0=1 → v1=2.
-VIDEOAMME_TALKER_N_ABOVE_50_MAX = 2
+VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX = 0.0133
+VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(
+    VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX
+)
+VIDEOAMME_TALKER_N_ABOVE_50_MAX = 1
 
 _VIDEOAMME_TALKER_AUDIO_P95 = {
     8: {
         "throughput_qps": 0.231,
         "tok_per_s_agg": 1.5,
         "latency_mean_s": 30.169,
-        "rtf_mean": 5.1571,
+        "rtf_mean": 4.9824,
     },
 }
 VIDEOAMME_TALKER_THRESHOLDS = apply_slack(_VIDEOAMME_TALKER_AUDIO_P95)
@@ -108,7 +108,7 @@ def test_videoamme_talker_accuracy_wer_and_speed(
     assert "wer" in results, "Audio WER results missing from Video-AMME Talker output"
     assert_wer_partitioned(
         results["wer"],
-        max_wer_below_50_corpus=VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_MAX,
+        max_wer_below_50_corpus=VIDEOAMME_TALKER_WER_BELOW_50_CORPUS_THRESHOLD,
         max_n_above_50=VIDEOAMME_TALKER_N_ABOVE_50_MAX,
     )
     assert_speed_thresholds(results["speed"], VIDEOAMME_TALKER_THRESHOLDS, CONCURRENCY)

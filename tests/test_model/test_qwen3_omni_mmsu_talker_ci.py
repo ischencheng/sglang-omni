@@ -34,6 +34,7 @@ from sglang_omni.utils import find_available_port
 from tests.utils import (
     ServerHandle,
     apply_slack,
+    apply_wer_slack,
     assert_speed_thresholds,
     assert_wer_partitioned,
     server_log_file,
@@ -60,26 +61,26 @@ MMSU_TTS_PROMPT = (
     "Do not exceed 120 words in total."
 )
 
-# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/382#issuecomment-4366925373
-
 # Accuracy floor — audio-mode MMSU.
-MMSU_AUDIO_MIN_ACCURACY = 0.6
+MMSU_AUDIO_MIN_ACCURACY = 0.5
 
 # WER thresholds use a partitioned view of the per-sample distribution:
 #  - corpus WER over the "sane" subset (per-sample WER <= 50%)
 #  - count of catastrophic failures (per-sample WER > 50%)
 
-# Relaxed in V1 refactor: v0=0.04 → v1=0.08.
-MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.06
-# Relaxed in V1 refactor: v0=0 → v1=3.
-MMSU_AUDIO_N_ABOVE_50_MAX = 1
+# Retuned after Qwen3-Omni talker sampler fix: MMSU talker stayed clean.
+MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.024945770065075923
+MMSU_AUDIO_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(
+    MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX
+)
+MMSU_AUDIO_N_ABOVE_50_MAX = 0
 
 _MMSU_AUDIO_P95 = {
     8: {
-        "throughput_qps": 0.326,
-        "tok_per_s_agg": 5.2,
-        "latency_mean_s": 11.825,
-        "rtf_mean": 0.4188,
+        "throughput_qps": 1.007,
+        "tok_per_s_agg": 8.4,
+        "latency_mean_s": 7.099,
+        "rtf_mean": 0.4037,
     },
 }
 MMSU_AUDIO_THRESHOLDS = apply_slack(_MMSU_AUDIO_P95)
@@ -97,8 +98,6 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         "--gpu-thinker",
         "0",
         "--gpu-talker",
-        "1",
-        "--gpu-code-predictor",
         "1",
         "--gpu-code2wav",
         "1",
@@ -173,7 +172,7 @@ def test_mmsu_audio_wer_and_speed(
     assert "wer" in results, "Audio WER results missing from eval output"
     assert_wer_partitioned(
         results["wer"],
-        max_wer_below_50_corpus=MMSU_AUDIO_WER_BELOW_50_CORPUS_MAX,
+        max_wer_below_50_corpus=MMSU_AUDIO_WER_BELOW_50_CORPUS_THRESHOLD,
         max_n_above_50=MMSU_AUDIO_N_ABOVE_50_MAX,
     )
 

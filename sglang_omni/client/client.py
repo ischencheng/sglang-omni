@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any, AsyncIterator, Callable
 
 import numpy as np
@@ -177,6 +178,9 @@ class Client:
         audio_chunks: list[Any] = []
         sample_rate: int | None = None
         last_chunk: GenerateChunk | None = None
+        extra_params = dict(request.extra_params)
+        extra_params.pop("stream", None)
+        request = replace(request, stream=False, extra_params=extra_params)
 
         async for chunk in self.generate(request, request_id=request_id):
             if chunk.audio_data is not None:
@@ -263,6 +267,25 @@ class Client:
             chunk.sample_rate = sample_rate
 
     @staticmethod
+    def _build_usage_info(data: dict[str, Any]) -> UsageInfo | None:
+        usage = dict(data.get("usage") or {})
+        if "prompt_tokens" not in usage and data.get("prompt_tokens") is not None:
+            usage["prompt_tokens"] = data.get("prompt_tokens")
+        if (
+            "completion_tokens" not in usage
+            and data.get("completion_tokens") is not None
+        ):
+            usage["completion_tokens"] = data.get("completion_tokens")
+        if "total_tokens" not in usage:
+            prompt_tokens = usage.get("prompt_tokens")
+            completion_tokens = usage.get("completion_tokens")
+            if prompt_tokens is not None or completion_tokens is not None:
+                usage["total_tokens"] = (prompt_tokens or 0) + (completion_tokens or 0)
+        if "engine_time_s" not in usage and data.get("engine_time_s") is not None:
+            usage["engine_time_s"] = data.get("engine_time_s")
+        return UsageInfo.from_dict(usage)
+
+    @staticmethod
     def _build_omni_request(request: GenerateRequest) -> OmniRequest:
         inputs = _extract_inputs(request)
         params = _build_params(request)
@@ -288,14 +311,16 @@ class Client:
                 if isinstance(text, str):
                     chunk.text = text
                 Client._set_audio_data(chunk, c2w_result)
-                chunk.usage = UsageInfo.from_dict(decode_result.get("usage"))
+                chunk.usage = Client._build_usage_info(
+                    decode_result
+                ) or Client._build_usage_info(c2w_result)
                 return chunk
             text = result.get("text")
             if isinstance(text, str):
                 chunk.text = text
             token_ids = result.get("token_ids")
             if token_ids is not None:
-                if hasattr(token_ids, "tolist"):
+                if not isinstance(token_ids, (list, tuple)):
                     token_ids = token_ids.tolist()
                 chunk.token_ids = list(token_ids)
             logprobs = result.get("logprobs")
@@ -310,24 +335,7 @@ class Client:
             if modality is not None:
                 chunk.modality = modality
             Client._set_audio_data(chunk, result)
-            usage = dict(result.get("usage") or {})
-            if "prompt_tokens" not in usage and result.get("prompt_tokens") is not None:
-                usage["prompt_tokens"] = result.get("prompt_tokens")
-            if (
-                "completion_tokens" not in usage
-                and result.get("completion_tokens") is not None
-            ):
-                usage["completion_tokens"] = result.get("completion_tokens")
-            if "total_tokens" not in usage:
-                prompt_tokens = usage.get("prompt_tokens")
-                completion_tokens = usage.get("completion_tokens")
-                if prompt_tokens is not None or completion_tokens is not None:
-                    usage["total_tokens"] = (prompt_tokens or 0) + (
-                        completion_tokens or 0
-                    )
-            if "engine_time_s" not in usage and result.get("engine_time_s") is not None:
-                usage["engine_time_s"] = result.get("engine_time_s")
-            chunk.usage = UsageInfo.from_dict(usage)
+            chunk.usage = Client._build_usage_info(result)
             return chunk
         if isinstance(result, str):
             chunk.text = result
@@ -359,7 +367,7 @@ class Client:
                 chunk.text = text
             token_ids = data.get("token_ids")
             if token_ids is not None:
-                if hasattr(token_ids, "tolist"):
+                if not isinstance(token_ids, (list, tuple)):
                     token_ids = token_ids.tolist()
                 chunk.token_ids = list(token_ids)
             logprobs = data.get("logprobs")
@@ -368,9 +376,7 @@ class Client:
             finish_reason = data.get("finish_reason")
             if finish_reason is not None:
                 chunk.finish_reason = finish_reason
-            usage = data.get("usage")
-            if usage is not None:
-                chunk.usage = UsageInfo.from_dict(usage)
+            chunk.usage = Client._build_usage_info(data)
             stage_name = data.get("stage_name")
             if stage_name is not None:
                 chunk.stage_name = stage_name
@@ -415,11 +421,6 @@ def _extract_inputs(request: GenerateRequest) -> Any:
     audios = request.metadata.get("audios")
     images = request.metadata.get("images")
     videos = request.metadata.get("videos")
-    video_fps = request.metadata.get("video_fps")
-    video_max_frames = request.metadata.get("video_max_frames")
-    video_min_pixels = request.metadata.get("video_min_pixels")
-    video_max_pixels = request.metadata.get("video_max_pixels")
-    video_total_pixels = request.metadata.get("video_total_pixels")
 
     # If we have any media, return a dict with messages and media
     # Otherwise, return just the messages list (for backward compatibility)
@@ -431,16 +432,16 @@ def _extract_inputs(request: GenerateRequest) -> Any:
             result["audios"] = audios
         if videos:
             result["videos"] = videos
-        if video_fps is not None:
-            result["video_fps"] = video_fps
-        if video_max_frames is not None:
-            result["video_max_frames"] = video_max_frames
-        if video_min_pixels is not None:
-            result["video_min_pixels"] = video_min_pixels
-        if video_max_pixels is not None:
-            result["video_max_pixels"] = video_max_pixels
-        if video_total_pixels is not None:
-            result["video_total_pixels"] = video_total_pixels
+        for key in (
+            "video_fps",
+            "video_max_frames",
+            "video_min_pixels",
+            "video_max_pixels",
+            "video_total_pixels",
+        ):
+            value = request.metadata.get(key)
+            if value is not None:
+                result[key] = value
         return result
     return messages
 
@@ -461,4 +462,6 @@ def _build_params(request: GenerateRequest) -> dict[str, Any]:
         }
     if request.stage_params:
         params["stage_params"] = request.stage_params
+    if request.extra_params:
+        params.update(request.extra_params)
     return params

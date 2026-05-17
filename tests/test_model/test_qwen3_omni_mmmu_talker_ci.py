@@ -34,6 +34,7 @@ from benchmarks.metrics.wer import print_wer_summary
 from sglang_omni.utils import find_available_port
 from tests.utils import (
     apply_slack,
+    apply_wer_slack,
     assert_speed_thresholds,
     assert_wer_partitioned,
     server_log_file,
@@ -60,23 +61,24 @@ MMMU_TTS_PROMPT = (
     "Do not exceed 120 words in total."
 )
 
-# Threshold reference: https://github.com/sgl-project/sglang-omni/pull/382#issuecomment-4366925373
-
 # Accuracy floor — audio-mode MMMU.
 MMMU_AUDIO_MIN_ACCURACY = 0.7
 
 # WER thresholds use a partitioned view of the per-sample distribution:
 #  - corpus WER over the "sane" subset (per-sample WER <= 50%)
 #  - count of catastrophic failures (per-sample WER > 50%)
-MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.19
+MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX = 0.1777
+MMMU_AUDIO_WER_BELOW_50_CORPUS_THRESHOLD = apply_wer_slack(
+    MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX
+)
 MMMU_AUDIO_N_ABOVE_50_MAX = 2
 
 _MMMU_AUDIO_P95 = {
     8: {
-        "throughput_qps": 0.142,
-        "tok_per_s_agg": 4.3,
-        "latency_mean_s": 31.533,
-        "rtf_mean": 0.4497,
+        "throughput_qps": 0.389,
+        "tok_per_s_agg": 9.9,
+        "latency_mean_s": 13.641,
+        "rtf_mean": 0.3777,
     },
 }
 MMMU_AUDIO_THRESHOLDS = apply_slack(_MMMU_AUDIO_P95)
@@ -95,8 +97,6 @@ def server_process(tmp_path_factory: pytest.TempPathFactory):
         "--gpu-thinker",
         "0",
         "--gpu-talker",
-        "1",
-        "--gpu-code-predictor",
         "1",
         "--gpu-code2wav",
         "1",
@@ -155,7 +155,7 @@ def test_mmmu_audio_wer_and_speed(
     assert "wer" in results, "Audio WER results missing from eval output"
     assert_wer_partitioned(
         results["wer"],
-        max_wer_below_50_corpus=MMMU_AUDIO_WER_BELOW_50_CORPUS_MAX,
+        max_wer_below_50_corpus=MMMU_AUDIO_WER_BELOW_50_CORPUS_THRESHOLD,
         max_n_above_50=MMMU_AUDIO_N_ABOVE_50_MAX,
     )
 
