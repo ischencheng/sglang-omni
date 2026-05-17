@@ -273,10 +273,23 @@ requests can hang after the TP group is killed.
 - Partial-load checkpoint weights matching declared prefixes.
 - Expose `encode_batch(plan)`.
 
-The runner always sees exactly one CUDA device as `cuda:0`. The launcher maps
-the configured physical GPU into the child process with `CUDA_VISIBLE_DEVICES`
-before torch is imported. This rule applies to both `tp_size=1` and
-`tp_size>1`, so runner code does not branch on physical GPU ids.
+Launcher / runner CUDA view depends on `tp_size`, matching the existing
+`get_stage_process_env` behaviour in `sglang_omni/pipeline/stage_process.py:297`:
+
+- **`tp_size > 1`** — the launcher remaps `CUDA_VISIBLE_DEVICES` to the
+  single assigned physical GPU before torch is imported. The runner sees
+  that GPU as `cuda:0`, identical to thinker / talker TP today.
+- **`tp_size = 1, backend="sglang"`** — the launcher does **not** remap.
+  The runner sees the host's full CUDA device list and pins its
+  `cuda_device` directly from the resolved `gpu_id` factory kwarg. The
+  stage still runs through `MultiProcessPipelineRunner` (process-isolated
+  distributed init), but it does not need the single-device env shape.
+
+This split exists because the new `StageWorkerProcessSpec` topology
+(`sglang_omni/pipeline/stage_group.py:23-40`) lets a `tp_size=1` stage
+share an OS process with siblings, while a TP stage must own its process
+exclusively. Forcing the TP-only env remap onto every SGLang-backed
+stage would break the shared-process invariant.
 
 `server_args_overrides` is for safe SGLang loading/runtime knobs such as
 quantization, load format, attention backend, and remote weight loading. It must
@@ -345,7 +358,7 @@ top-level `StageMemoryConfig`:
 ```python
 StageConfig(
     name="image_encoder",
-    factory="sglang_omni.models.qwen3_omni.stages.create_image_encoder_runner",
+    factory="sglang_omni.models.qwen3_omni.stages.create_image_encoder_executor",
     factory_args={
         "backend": "sglang",
         "max_batch_size": 32,
@@ -377,13 +390,14 @@ after merging `factory_args` + `runtime_overrides`, and Phase 0 extends
 it with the same shape for `encoder_activation_budget_bytes`:
 
 - If the resolved factory has `encoder_activation_budget_bytes` in its
-  signature, inject `runtime.resources.encoder_activation_budget_bytes`
-  as that kwarg (or `activation_budget_bytes` — the factory uses the
-  shorter name; the resolver adapts).
-- If `factory_args` / `runtime_overrides` already set the kwarg, fail
-  with a `ValueError` pointing at both sources — admission cap is
-  single-sourced from `runtime.resources` exactly like
-  `total_gpu_memory_fraction` is today (`runtime.py:reject_untyped_total_gpu_memory_fraction`).
+  signature, inject
+  `runtime.resources.encoder_activation_budget_bytes` as that kwarg.
+- If `factory_args` or `runtime_overrides` set
+  `encoder_activation_budget_bytes` at all — typed source present or
+  not — fail with a `ValueError`. This matches PR #430's unconditional
+  `reject_untyped_total_gpu_memory_fraction`
+  (`sglang_omni/config/runtime.py:58-72`): typed source is the only
+  valid path, any untyped source always fails.
 
 See the detailed RFC for the resolver-side sketch and the rejection
 rule:
@@ -473,9 +487,16 @@ and the deletion of the obsolete planner-side reserve plumbing.
 
 Use these names in the Phase 0 implementation:
 
-- `SGLangEncoderRunner`, not `SGLangEncoderWorker`.
-- `create_image_encoder_runner`, not `create_image_encoder_executor`.
-- `create_audio_encoder_runner`, not `create_audio_encoder_executor`.
+- `SGLangEncoderRunner`, not `SGLangEncoderWorker` (new class, new file).
+- Existing factory names stay: `create_image_encoder_executor` and
+  `create_audio_encoder_executor`
+  (`sglang_omni/models/qwen3_omni/stages.py:781,823`). Phase 0 extends
+  them with `backend: Literal["local", "sglang", "auto"] = "local"`
+  rather than renaming. Renaming would require migrating
+  `sglang_omni/models/qwen3_omni/config.py:45,59` and any cookbook
+  configs that already reference `_executor`; the kept name does not
+  block the SGLang code path because the factory body branches on
+  `backend`.
 - `entry_rank` / `non_entry_rank` in new code; `entry rank` /
   `non-entry rank` in prose. Keep existing Stage `leader/follower` names only
   when discussing Stage process roles.
@@ -487,8 +508,11 @@ Phase 0:
 - Add `SGLangEncoderRunner`.
 - Add `EncoderScheduler`.
 - Add Qwen3-Omni image/audio `EncoderAdapter`s.
-- Add `create_image_encoder_runner` and `create_audio_encoder_runner` with
-  `backend="local"` as the default.
+- Extend existing `create_image_encoder_executor` /
+  `create_audio_encoder_executor` factories with
+  `backend: Literal["local", "sglang", "auto"] = "local"`. Default
+  stays `"local"`; the factory body routes to `SGLangEncoderRunner` +
+  `EncoderScheduler` when resolved backend is `"sglang"`.
 - Add conservative image/video and audio activation admission, including
   single-request guards.
 - Add `runtime.resources.encoder_activation_budget_bytes` field on

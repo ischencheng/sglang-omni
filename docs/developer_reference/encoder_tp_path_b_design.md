@@ -1238,6 +1238,28 @@ local-master / shard-index slot, which is undefined for
 
 #### Required launcher change
 
+> **OBSOLETE (2026-05-17).** The proposal in this subsection —
+> `single_visible_device: bool = False` on `StageProcessSpec`,
+> extending `get_stage_process_env` to remap `CUDA_VISIBLE_DEVICES`
+> at `tp_size=1` for SGLang-backed stages, and the
+> resolver-side detection of `backend in {"sglang", "auto"}` — is
+> **not** implemented in Phase 0. The post-merge main has
+> `StageWorkerProcessSpec` topology that allows multiple stages to
+> share an OS process (`sglang_omni/pipeline/stage_process.py:90`),
+> and enforces "TP stages must own their OS process exclusively"
+> (`sglang_omni/pipeline/stage_group.py:23-40`). Forcing every
+> SGLang-backed `tp_size=1` stage through the TP-only env remap
+> would break the shared-process invariant. The corrected launch
+> contract is in
+> [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
+> at the end of this file. The pseudocode below stays for
+> design-history context but **do not implement it as written**.
+>
+> Specifically obsolete: every mention of `single_visible_device`,
+> the `_resolve_factory_args` change that injects it, and the
+> "Required launcher sub-step" list in the Phase 0 Implementation
+> Plan that references it.
+
 `backend="sglang"` stages — including `tp_size=1` — must reach the
 runner through a process whose `CUDA_VISIBLE_DEVICES` has been remapped
 to a single physical GPU and whose `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`
@@ -3447,8 +3469,21 @@ The one field Phase 0 adds:
 ```python
 class StageResourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    total_gpu_memory_fraction: float | None = None   # existing (PR #430)
-    encoder_activation_budget_bytes: int | None = None   # NEW
+    total_gpu_memory_fraction: float | None = None         # existing (PR #430)
+    encoder_activation_budget_bytes: int | None = None     # NEW
+
+    def model_post_init(self, __context: Any = None) -> None:
+        value = self.total_gpu_memory_fraction
+        if value is not None and not 0.0 < value <= 1.0:
+            raise ValueError(
+                "runtime.resources.total_gpu_memory_fraction must be in (0, 1]"
+            )
+        budget = self.encoder_activation_budget_bytes
+        if budget is not None and budget <= 0:
+            raise ValueError(
+                "runtime.resources.encoder_activation_budget_bytes must be a "
+                "positive integer"
+            )
 ```
 
 `encoder_activation_budget_bytes` is **admission-only**. It is fed into
@@ -3462,8 +3497,10 @@ overall residency:
 - `encoder_activation_budget_bytes` controls how big a single batch's
   activation peak can be inside that residency.
 
-Both fields are validated by the existing `StageResourceConfig.model_post_init`
-range checks; only `encoder_activation_budget_bytes` is new.
+The new field adds its own range check to `model_post_init` (positive
+int or `None`). The current `StageResourceConfig.model_post_init`
+(`sglang_omni/config/schema.py:59-64`) only validates
+`total_gpu_memory_fraction`; Phase 0 extends it as shown above.
 
 ### Injection contract for `encoder_activation_budget_bytes`
 
@@ -3485,24 +3522,33 @@ if (
     args["encoder_activation_budget_bytes"] = encoder_activation_budget_bytes
 ```
 
-And the same `reject_untyped_*` style guard for duplicate sources:
+And the same unconditional `reject_untyped_*` guard PR #430 uses
+(`runtime.py:58-72`). The signature is `(stage_name, factory_args,
+runtime_overrides)` — it does **not** take `stage_cfg`; the rule is
+"any untyped source for this field is rejected", regardless of whether
+the typed source is also set:
 
 ```python
-def reject_untyped_encoder_activation_budget_bytes(stage_name, factory_args, runtime_overrides):
-    typed = stage_cfg.runtime.resources.encoder_activation_budget_bytes
-    untyped = (
-        factory_args.get("encoder_activation_budget_bytes")
-        or runtime_overrides.get("encoder_activation_budget_bytes")
+def reject_untyped_encoder_activation_budget_bytes(
+    stage_name: str,
+    factory_args: dict[str, Any],
+    runtime_overrides: dict[str, Any],
+) -> None:
+    if (
+        factory_args.get("encoder_activation_budget_bytes") is None
+        and runtime_overrides.get("encoder_activation_budget_bytes") is None
+    ):
+        return
+    raise ValueError(
+        f"Stage {stage_name!r} sets encoder_activation_budget_bytes "
+        "through factory_args/runtime_overrides; set "
+        "runtime.resources.encoder_activation_budget_bytes instead"
     )
-    if typed is not None and untyped is not None:
-        raise ValueError(
-            f"Stage {stage_name!r} sets encoder_activation_budget_bytes "
-            f"through both runtime.resources and factory_args/runtime_overrides"
-        )
 ```
 
-This is the same pattern PR #430 uses for `total_gpu_memory_fraction`
-(`runtime.py:58-71`). No new resolver shape, no new injection point —
+This is the same shape PR #430 uses for `total_gpu_memory_fraction`
+(`runtime.py:58-72`): typed source is the only valid path, untyped
+sources always fail. No new resolver shape, no new injection point —
 one more field in an established mechanism.
 
 ## Launch path reconciliation with main
