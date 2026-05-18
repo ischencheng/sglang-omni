@@ -1593,14 +1593,25 @@ class SGLangEncoderRunner:
         # "Launch path reconciliation with main" for the contract:
         #   - tp_size > 1: launcher remaps CUDA_VISIBLE_DEVICES to the
         #     single assigned physical GPU; the runner sees it as cuda:0.
-        #   - tp_size == 1, backend="sglang": no remap. The runner
-        #     sees the host's full CUDA device list and must pin
-        #     cuda_device to the resolved gpu_id factory kwarg.
+        #     SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true is also set, so
+        #     SGLang's GroupCoordinator picks cuda:0 regardless of
+        #     local_rank (parallel_state.py:267-271). local_rank carries
+        #     the tp_rank identity for distributed bookkeeping; the CUDA
+        #     index falls out of the env var.
+        #   - tp_size == 1, backend="sglang": no remap and
+        #     SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS is NOT set. SGLang's
+        #     GroupCoordinator then uses local_rank itself as the CUDA
+        #     device index (`cuda:{local_rank}`,
+        #     parallel_state.py:269). The runner must pin both
+        #     cuda_device AND dist_local_rank to the resolved gpu_id —
+        #     otherwise the model loads on cuda:gpu_id but the TP/world
+        #     group lands on cuda:0, breaking every collective.
         if tp_size > 1:
             cuda_device = 0
+            dist_local_rank = tp_rank
         else:
             cuda_device = int(gpu_id)
-        dist_local_rank = tp_rank
+            dist_local_rank = int(gpu_id)
         self.device = torch.device(f"cuda:{cuda_device}")
 
         # Runner-managed kwargs that build_sglang_encoder_server_args is
@@ -3360,12 +3371,14 @@ Phase 1 — parity validation (gates Phase 2):
 7. GPU parity test: `backend="local"` vs `backend="sglang", tp_size=1` on
    image encoder and audio encoder, in isolation, at a non-zero
    `gpu` (e.g. `gpu=4`). At `tp_size=1` the launcher does **not** remap
-   `CUDA_VISIBLE_DEVICES`; the runner pins `cuda_device` from the
-   resolved `gpu_id` factory kwarg directly. Asserts the runner ended
-   up on the configured GPU: child env keeps the host's
-   `CUDA_VISIBLE_DEVICES` unchanged, and
-   `next(model.parameters()).device.index == 4`. The
-   `tp_size > 1` lane (test 8 below) verifies the remap shape.
+   `CUDA_VISIBLE_DEVICES`; the runner pins both `cuda_device` and
+   `dist_local_rank` from the resolved `gpu_id` factory kwarg.
+   Asserts: child env keeps the host's `CUDA_VISIBLE_DEVICES`
+   unchanged, `next(model.parameters()).device.index == 4`, **and**
+   `get_world_group().local_rank == 4` (locks the
+   `dist_local_rank == gpu_id` rule that keeps the TP/world group
+   on the same device as the model). The `tp_size > 1` lane
+   (test 8 below) verifies the remap shape.
 8. TP parity test: `backend="sglang", tp_size=1` vs `tp_size=2`, within
    the empirical tolerance described in
    `encoder_tp_parity_findings.md` (not the original `atol=1e-3, rtol=1e-3`,

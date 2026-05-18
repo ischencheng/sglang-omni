@@ -279,11 +279,19 @@ Launcher / runner CUDA view depends on `tp_size`, matching the existing
 - **`tp_size > 1`** — the launcher remaps `CUDA_VISIBLE_DEVICES` to the
   single assigned physical GPU before torch is imported. The runner sees
   that GPU as `cuda:0`, identical to thinker / talker TP today.
-- **`tp_size = 1, backend="sglang"`** — the launcher does **not** remap.
-  The runner sees the host's full CUDA device list and pins its
-  `cuda_device` directly from the resolved `gpu_id` factory kwarg. The
-  stage still runs through `MultiProcessPipelineRunner` (process-isolated
-  distributed init), but it does not need the single-device env shape.
+- **`tp_size = 1, backend="sglang"`** — the launcher does **not** remap
+  and **does not** set `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`. The
+  runner sees the host's full CUDA device list and must pin **both**
+  `cuda_device` and `dist_local_rank` to the resolved `gpu_id`
+  factory kwarg. Pinning only `cuda_device` while leaving
+  `dist_local_rank=tp_rank=0` would load the model on
+  `cuda:<gpu_id>` but place SGLang's TP/world group on `cuda:0`,
+  because upstream `GroupCoordinator` uses `local_rank` itself as
+  the CUDA index when the env var is unset
+  (`sglang/python/sglang/srt/distributed/parallel_state.py:267-271`).
+  The stage still runs through `MultiProcessPipelineRunner`
+  (process-isolated distributed init), but it does not need the
+  single-device env shape.
 
 This split exists because the new `StageWorkerProcessSpec` topology
 (`sglang_omni/pipeline/stage_group.py:23-40`) lets a `tp_size=1` stage
