@@ -611,13 +611,17 @@ Phase 0:
 - Extend `resolve_stage_factory_args` to inject the new field and reject
   duplicates in `factory_args` / `runtime_overrides`, using the same shape
   as the existing `total_gpu_memory_fraction` injection.
-- Add launcher validation for SGLang-backed encoder stages. CUDA env remap
-  reuses the existing TP-only path (`get_stage_process_env` already returns
-  `{}` for `tp_size <= 1`); a `backend="sglang", tp_size=1` encoder still
-  goes through `MultiProcessPipelineRunner` for distributed init but does
-  not get the `CUDA_VISIBLE_DEVICES=<one>` remap — instead the runner pins
-  `cuda_device` to its assigned `gpu_id` directly (see detailed RFC for the
-  reconciled launch path).
+- Add launcher validation for SGLang-backed encoder stages. Widen
+  `get_stage_process_env`'s existing TP remap branch so any stage with
+  resolved `backend in {"sglang", "auto"}` gets the single-device shape
+  (`CUDA_VISIBLE_DEVICES=<one>` + `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`)
+  regardless of `tp_size`. The runner then uses `cuda_device=0,
+  dist_local_rank=tp_rank` uniformly across tp lanes (which is `0` at
+  `tp_size=1`). Local-only `tp_size=1` stages keep the early-return
+  `{}`. The earlier "tp_size=1 no remap, pin cuda_device to gpu_id"
+  variant is retracted because it left `local_rank=gpu_id`, which
+  breaks SGLang's node-local-rank checks (local-master gating and
+  checkpoint shard slicing assume `local_rank ∈ [0, world_size)`).
 - Allocate `nccl_port` in the parent for every SGLang-backed stage, including
   `tp_size=1`, and reject missing ports in the runner.
 - Add fatal-path plumbing: a non-zero TP child exit tears down the stage group
