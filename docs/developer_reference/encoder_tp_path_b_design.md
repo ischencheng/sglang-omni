@@ -158,14 +158,20 @@ Three observations from the code walk drive Plan B:
      `build_process_topology_plan` (`sglang_omni/config/topology.py:36`):
      any process group containing a stage with resolved
      `backend in {"sglang", "auto"}` must have exactly one member.
-   - **No CUDA env remap at `tp_size=1`**: `get_stage_process_env` keeps
-     its existing `if spec.tp_size <= 1: return {}` early return. The
-     SGLang encoder runner pins `cuda_device` directly from the
-     resolved `gpu_id` factory kwarg.
+   - **Uniform single-device env remap for SGLang-backed stages**:
+     extend `get_stage_process_env`'s existing `tp_size > 1` remap
+     branch to also fire when resolved `backend in {"sglang", "auto"}`,
+     regardless of `tp_size`. `CUDA_VISIBLE_DEVICES` is set to the
+     single physical GPU and `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`.
+     Safe to widen the scope because SGLang-backed stages now own their
+     OS process exclusively (rule above), so the TP-only env shape no
+     longer conflicts with shared-process scheduling. Local-only
+     `tp_size=1` stages keep the early-return `{}`.
    - **TP preflight + parent-allocated `nccl_port`** in
      `_build_stage_groups` (`sglang_omni/pipeline/mp_runner.py:37`):
-     Layer 1 rejects any TP stage whose factory does not accept
-     `tp_rank/tp_size/nccl_port`; Layer 2 (backend-aware factories
+     Layer 1 rejects any stage with resolved `tp_size > 1` **or**
+     `backend in {"sglang", "auto"}` whose factory does not accept
+     `tp_rank/tp_size/nccl_port`. Layer 2 (backend-aware factories
      only) rejects `tp_size > 1` unless resolved `backend == "sglang"`.
      The runner allocates a NCCL port for every SGLang-backed stage
      including `tp_size=1` and injects it into the resolved factory
@@ -1588,30 +1594,23 @@ class SGLangEncoderRunner:
         dist_addr = f"127.0.0.1:{port}"               # for ServerArgs
         dist_init_method = f"tcp://{dist_addr}"       # for torch init
 
-        # GPU pinning depends on whether the launcher remapped
-        # CUDA_VISIBLE_DEVICES for this process. See
-        # "Launch path reconciliation with main" for the contract:
-        #   - tp_size > 1: launcher remaps CUDA_VISIBLE_DEVICES to the
-        #     single assigned physical GPU; the runner sees it as cuda:0.
-        #     SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true is also set, so
-        #     SGLang's GroupCoordinator picks cuda:0 regardless of
-        #     local_rank (parallel_state.py:267-271). local_rank carries
-        #     the tp_rank identity for distributed bookkeeping; the CUDA
-        #     index falls out of the env var.
-        #   - tp_size == 1, backend="sglang": no remap and
-        #     SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS is NOT set. SGLang's
-        #     GroupCoordinator then uses local_rank itself as the CUDA
-        #     device index (`cuda:{local_rank}`,
-        #     parallel_state.py:269). The runner must pin both
-        #     cuda_device AND dist_local_rank to the resolved gpu_id —
-        #     otherwise the model loads on cuda:gpu_id but the TP/world
-        #     group lands on cuda:0, breaking every collective.
-        if tp_size > 1:
-            cuda_device = 0
-            dist_local_rank = tp_rank
-        else:
-            cuda_device = int(gpu_id)
-            dist_local_rank = int(gpu_id)
+        # GPU pinning is uniform across tp_size lanes because the
+        # launcher always remaps CUDA_VISIBLE_DEVICES for SGLang-backed
+        # stages (extended from the existing TP-only remap so single-rank
+        # SGLang encoders get the same single-device process shape).
+        # See "Launch path reconciliation with main" for the contract.
+        #
+        # SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true is set, so
+        # GroupCoordinator pins device_id=0 regardless of local_rank
+        # (parallel_state.py:267-271). dist_local_rank stays at 0 in
+        # the tp_size=1 lane and at tp_rank in the tp_size>1 lane —
+        # local_rank is also consulted as the *node-local* rank for
+        # local-master decisions (custom_all_reduce_utils.py:280) and
+        # checkpoint shard slicing (weight_utils.py:814-820), so it
+        # must remain in [0, world_size). Using gpu_id here would
+        # break both at world_size=1.
+        cuda_device = 0
+        dist_local_rank = tp_rank
         self.device = torch.device(f"cuda:{cuda_device}")
 
         # Runner-managed kwargs that build_sglang_encoder_server_args is
@@ -3115,14 +3114,21 @@ Phase 0 — landing path that doesn't break v1:
      (`sglang_omni/pipeline/stage_group.py:23-40`): fire the
      existing assertion shape for any SGLang-backed stage too.
      Belt-and-suspenders.
-   - **No CUDA env remap for `tp_size=1`.** `get_stage_process_env`
-     (`sglang_omni/pipeline/stage_process.py:292-319`) keeps its
-     existing `if spec.tp_size <= 1: return {}` early return.
-     SGLang-backed `tp_size=1` stages see the host's full CUDA
-     device list and pin `cuda_device` inside the runner from the
-     resolved `gpu_id` factory kwarg. The
-     `single_visible_device: bool` flag proposed in the obsolete
-     sections above is **not** added.
+   - **Single-device env remap for SGLang-backed stages.** Extend
+     `get_stage_process_env` (`sglang_omni/pipeline/stage_process.py:292-319`)
+     so the existing TP remap branch (which sets
+     `CUDA_VISIBLE_DEVICES=<one>` and
+     `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`) also fires when
+     resolved `backend in {"sglang", "auto"}`, regardless of
+     `tp_size`. Local-only `tp_size=1` stages still take the
+     early-return `{}` path. This widening is safe because
+     SGLang-backed stages own their OS process exclusively (the
+     process-exclusivity rule above), so the TP-only env shape no
+     longer conflicts with sibling stages. With the env var set,
+     SGLang's `GroupCoordinator` pins device to `cuda:0` regardless
+     of `local_rank` (`parallel_state.py:267-271`), and `local_rank=0`
+     remains correct for the local-master / shard-slice checks at
+     `world_size=1`.
    - **No launcher MP gating.** `sglang_omni/serve/launcher.py:212`
      already routes every pipeline through `MultiProcessPipelineRunner`
      unconditionally; there is no longer a `needs_mp` predicate to
@@ -3135,14 +3141,14 @@ Phase 0 — landing path that doesn't break v1:
      - **Layer 1** — any stage that **will receive** TP launch
        kwargs must have a factory whose signature accepts
        `tp_rank`, `tp_size`, and `nccl_port`. The set of such
-       stages is `tp_size > 1 OR resolved backend == "sglang"` —
-       SGLang-backed `tp_size=1` encoders also receive
-       parent-allocated `nccl_port` and a `tp_rank=0, tp_size=1`
-       pair (the runner rejects `nccl_port=None`), so they must
-       advertise the same signature shape as a TP factory. A
-       single-rank SGLang encoder whose factory signature is
-       missing any of those three kwargs fails this preflight
-       before spawn.
+       stages is `tp_size > 1 OR resolved backend in {"sglang", "auto"}`
+       — both `"sglang"` (current) and `"auto"` (Phase 2 may
+       resolve it to SGLang) get the parent-allocated `nccl_port`
+       and `tp_rank=0, tp_size=1` injection in the singleton case,
+       and the runner rejects `nccl_port=None`. Including `auto`
+       in the preflight prevents a Phase 2 `auto` encoder from
+       passing without TP kwargs in its signature and then crashing
+       inside the SGLang branch with `nccl_port=None`.
      - **Layer 2 (backend-aware factories only)** — if the factory's
        signature contains a `backend` parameter (i.e. is one of the
        encoder factories `create_image_encoder_executor` /
@@ -3195,12 +3201,15 @@ Phase 0 — landing path that doesn't break v1:
    `resolve_stage_factory_args`) — there is no `compile_pipeline()`
    to assert against on current main.
 
-   - **`get_stage_process_env` unchanged at `tp_size=1`**: spec with
-     `tp_size=1` returns `{}` regardless of resolved backend (no
-     `single_visible_device` flag exists). spec with `tp_size>1`
-     returns the remap env dict as today. This locks the
-     "no env remap for tp_size=1, runner pins gpu_id directly"
-     contract.
+   - **`get_stage_process_env` remap branches on resolved backend**:
+     spec with `tp_size=1` and resolved `backend="local"` returns
+     `{}` (early return preserved). Spec with `tp_size=1` and
+     resolved `backend in {"sglang", "auto"}` returns the remap env
+     dict with `CUDA_VISIBLE_DEVICES` set to the assigned GPU and
+     `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`. Spec with
+     `tp_size>1` returns the remap env dict as today regardless of
+     backend. This locks the uniform single-device remap for
+     SGLang-backed stages.
    - **TP preflight Layer 1 (factory not TP-capable)**: build a
      config where a SimpleScheduler factory like
      `create_aggregate_executor` (no `tp_rank/tp_size/nccl_port` in
@@ -3370,15 +3379,18 @@ Phase 1 — parity validation (gates Phase 2):
 
 7. GPU parity test: `backend="local"` vs `backend="sglang", tp_size=1` on
    image encoder and audio encoder, in isolation, at a non-zero
-   `gpu` (e.g. `gpu=4`). At `tp_size=1` the launcher does **not** remap
-   `CUDA_VISIBLE_DEVICES`; the runner pins both `cuda_device` and
-   `dist_local_rank` from the resolved `gpu_id` factory kwarg.
-   Asserts: child env keeps the host's `CUDA_VISIBLE_DEVICES`
-   unchanged, `next(model.parameters()).device.index == 4`, **and**
-   `get_world_group().local_rank == 4` (locks the
-   `dist_local_rank == gpu_id` rule that keeps the TP/world group
-   on the same device as the model). The `tp_size > 1` lane
-   (test 8 below) verifies the remap shape.
+   `gpu` (e.g. `gpu=4`). At `tp_size=1` the launcher remaps
+   `CUDA_VISIBLE_DEVICES` to the assigned physical GPU and sets
+   `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true` (same shape as
+   `tp_size > 1`). Asserts: child env has
+   `CUDA_VISIBLE_DEVICES == "4"` and
+   `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS == "true"`,
+   `next(model.parameters()).device.index == 0` (the only visible
+   CUDA device shows up as `cuda:0` inside the child), and
+   `get_world_group().local_rank == 0` (the world-size-1 rank
+   identity stays at 0 so local-master / shard-slice checks behave
+   correctly). The `tp_size > 1` lane (test 8 below) verifies the
+   same remap shape with multiple ranks.
 8. TP parity test: `backend="sglang", tp_size=1` vs `tp_size=2`, within
    the empirical tolerance described in
    `encoder_tp_parity_findings.md` (not the original `atol=1e-3, rtol=1e-3`,
@@ -3762,29 +3774,28 @@ topology`) made two relevant changes:
    exclusively**. Mixing a TP stage with anything else in the same
    process raises `AssertionError` at spawn time.
 
-`get_stage_process_env` (`stage_process.py:292-319`) still remaps
-`CUDA_VISIBLE_DEVICES` only when `tp_size > 1` — the `single_visible_device`
-flag proposed in earlier revisions of this RFC is **not** added.
+`get_stage_process_env` (`stage_process.py:292-319`) currently remaps
+`CUDA_VISIBLE_DEVICES` only when `tp_size > 1`. Phase 0 widens that
+condition to also fire when the resolved backend is `"sglang"` or
+`"auto"`, regardless of `tp_size`. The earlier proposed
+`single_visible_device` flag is **not** the mechanism — the condition
+moves into the existing predicate directly.
 
 What this means for encoder TP launch:
 
-- **`backend="sglang", tp_size > 1`** — already handled by the existing
-  TP-only env remap. The encoder runner inherits the
-  `CUDA_VISIBLE_DEVICES=<single>` shape and sees its physical GPU as
-  `cuda:0`. Identical to thinker TP today.
-- **`backend="sglang", tp_size = 1`** — no env remap. The launcher
-  still forces this stage through `MultiProcessPipelineRunner` (to get
-  process-isolated distributed init and one
-  `init_distributed_environment` per process), but the runner sees
-  the host's full CUDA device list. It pins `cuda_device` directly
-  from the resolved `gpu_id` factory kwarg. `nccl_port` is allocated
-  by the parent for every SGLang-backed stage (no child-side free-port
-  probe). **This stage owns its OS process exclusively** — see
-  [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)
-  below.
+- **`backend in {"sglang", "auto"}, tp_size >= 1`** — uniform
+  single-device env shape. The launcher remaps
+  `CUDA_VISIBLE_DEVICES` to the assigned physical GPU and sets
+  `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`. The encoder runner
+  sees its physical GPU as `cuda:0` and uses
+  `cuda_device=0, dist_local_rank=tp_rank` (which is `0` in the
+  single-rank lane). `nccl_port` is parent-allocated; the child
+  rejects `None`. **The stage owns its OS process exclusively** —
+  see [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)
+  below for why widening the remap scope is safe here.
 - **`backend="local", tp_size = 1`** — no change. Stays in
   `SimpleScheduler`, may share an OS process with sibling stages per
-  the new topology rules.
+  the topology rules.
 
 ### SGLang-backed stages must own their OS process
 

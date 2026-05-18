@@ -279,19 +279,25 @@ Launcher / runner CUDA view depends on `tp_size`, matching the existing
 - **`tp_size > 1`** — the launcher remaps `CUDA_VISIBLE_DEVICES` to the
   single assigned physical GPU before torch is imported. The runner sees
   that GPU as `cuda:0`, identical to thinker / talker TP today.
-- **`tp_size = 1, backend="sglang"`** — the launcher does **not** remap
-  and **does not** set `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`. The
-  runner sees the host's full CUDA device list and must pin **both**
-  `cuda_device` and `dist_local_rank` to the resolved `gpu_id`
-  factory kwarg. Pinning only `cuda_device` while leaving
-  `dist_local_rank=tp_rank=0` would load the model on
-  `cuda:<gpu_id>` but place SGLang's TP/world group on `cuda:0`,
-  because upstream `GroupCoordinator` uses `local_rank` itself as
-  the CUDA index when the env var is unset
-  (`sglang/python/sglang/srt/distributed/parallel_state.py:267-271`).
-  The stage still runs through `MultiProcessPipelineRunner`
-  (process-isolated distributed init), but it does not need the
-  single-device env shape.
+- **`tp_size = 1, backend in {"sglang", "auto"}`** — the launcher
+  remaps `CUDA_VISIBLE_DEVICES` to the single assigned physical GPU
+  and sets `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true` for this
+  process, the same shape it uses for `tp_size>1`. The runner sees
+  the GPU as `cuda:0` and uses `cuda_device=0, dist_local_rank=0`.
+  This is safe because the
+  [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)
+  rule already forbids sharing the process with any sibling, so the
+  TP-only env shape no longer conflicts with shared-process
+  scheduling. Using the same shape for both tp_size lanes also
+  avoids the `local_rank == gpu_id` problem: upstream uses
+  `local_rank` not just for CUDA index fallback
+  (`parallel_state.py:267-271`) but also for **node-local-rank
+  decisions** — local-master gating
+  (`custom_all_reduce_utils.py:280`) and checkpoint shard slicing
+  (`weight_utils.py:814-820`). At `world_size=1, local_rank=4` those
+  would skip rank-0 work and slice files as if ranks 0..3 existed.
+  Keeping `local_rank=0` recovers correct local-master and
+  shard-slice behaviour.
 
 This split exists because the new `StageWorkerProcessSpec` topology
 (`sglang_omni/pipeline/stage_group.py:23-40`) lets a `tp_size=1` stage
@@ -479,11 +485,15 @@ Launcher rules:
   vanished `compile_pipeline()`.
 - TP-launch-kwarg preflight runs inside `_build_stage_groups` and
   applies to **every stage that will receive TP launch kwargs** —
-  `tp_size > 1` **or** resolved `backend == "sglang"` (including
-  single-rank SGLang encoders, which also receive a parent-allocated
-  `nccl_port` and `tp_rank=0, tp_size=1`). Any such factory whose
-  signature does not accept `tp_rank/tp_size/nccl_port` fails
-  preflight before spawn. A second layer applies only to
+  `tp_size > 1` **or** resolved `backend in {"sglang", "auto"}`
+  (including single-rank SGLang encoders, which also receive a
+  parent-allocated `nccl_port` and `tp_rank=0, tp_size=1`). Any such
+  factory whose signature does not accept `tp_rank/tp_size/nccl_port`
+  fails preflight before spawn. `auto` is included alongside `sglang`
+  because Phase 2 makes `auto` resolve to SGLang for adapters that
+  support it; a single-rank `auto` encoder must therefore advertise
+  the same factory signature shape so its SGLang code path receives a
+  valid `nccl_port` instead of `None`. A second layer applies only to
   backend-aware factories: `tp_size > 1` ⇒ resolved
   `backend == "sglang"`. AR factories (thinker/talker) take TP
   launch params without a `backend` parameter and pass through
