@@ -435,12 +435,13 @@ it with the same shape for `encoder_activation_budget_bytes`:
 - If the resolved factory has `encoder_activation_budget_bytes` in its
   signature, inject
   `runtime.resources.encoder_activation_budget_bytes` as that kwarg.
-- If `factory_args` or `runtime_overrides` set
-  `encoder_activation_budget_bytes` at all — typed source present or
-  not — fail with a `ValueError`. This matches PR #430's unconditional
-  `reject_untyped_total_gpu_memory_fraction`
-  (`sglang_omni/config/runtime.py:58-72`): typed source is the only
-  valid path, any untyped source always fails.
+- If `factory_args` or `runtime_overrides` contain
+  `encoder_activation_budget_bytes` **as a key** — including the
+  YAML form `encoder_activation_budget_bytes: null` that deserializes
+  to `None` — fail with a `ValueError`. The check must be by key
+  presence (`key in d`), not by non-None value: a `None` value would
+  otherwise satisfy a `.get(...) is not None` check and disable the
+  admission cap silently. Typed source is the only valid path.
 
 See the detailed RFC for the resolver-side sketch and the rejection
 rule:
@@ -468,12 +469,17 @@ Launcher rules:
   (`sglang_omni/pipeline/mp_runner.py:37`). Encoder TP Phase 0
   validation hooks into those three call sites instead of a
   vanished `compile_pipeline()`.
-- TP preflight runs inside `_build_stage_groups` and rejects any
-  factory that does not accept `tp_rank/tp_size/nccl_port`. Encoder
-  TP additionally requires `backend="sglang"`, but only on
-  backend-aware factories — AR factories (thinker/talker) take TP
-  launch params without a `backend` parameter and must pass
-  preflight unchanged.
+- TP-launch-kwarg preflight runs inside `_build_stage_groups` and
+  applies to **every stage that will receive TP launch kwargs** —
+  `tp_size > 1` **or** resolved `backend == "sglang"` (including
+  single-rank SGLang encoders, which also receive a parent-allocated
+  `nccl_port` and `tp_rank=0, tp_size=1`). Any such factory whose
+  signature does not accept `tp_rank/tp_size/nccl_port` fails
+  preflight before spawn. A second layer applies only to
+  backend-aware factories: `tp_size > 1` ⇒ resolved
+  `backend == "sglang"`. AR factories (thinker/talker) take TP
+  launch params without a `backend` parameter and pass through
+  Layer 1 unchanged.
 - Process exclusivity for SGLang-backed stages is enforced in
   `build_process_topology_plan`
   (`sglang_omni/config/topology.py:36`): any process group that
@@ -625,9 +631,18 @@ Minimum validation should cover:
 - Unit: upstream compatibility smoke for the allowlisted SGLang symbols and
   Qwen3-Omni image/audio module signatures.
 - Unit: adapter batch planning, payload round-trip, skip/cache handling, and
-  image/audio activation-budget admission.
-- Unit: co-located encoder + thinker memory aggregation applies the encoder
-  reserve to the thinker `ServerArgs` before launch.
+  image/audio activation-budget admission (target the
+  `runtime.resources.encoder_activation_budget_bytes` injection path
+  and `reject_untyped_encoder_activation_budget_bytes`).
+- Unit: co-located encoder + thinker memory accounting under PR #430's
+  process-scoped path — assert the AR runner's `gpu_mem_accounting`
+  log records the `nvml_process` or `stage_load_fallback` branch and
+  the available-for-KV value matches
+  `total_memory * total_gpu_memory_fraction - process_used`. There is
+  no planner-side `apply_encoder_mem_reserve` step to validate on
+  current main; the
+  [Memory And Co-Location Contract](#memory-and-co-location-contract)
+  above is the source of truth.
 - Unit: TP metadata/tensor fan-out does not pickle tensor payload bytes and does
   not issue device broadcasts after allocation failure.
 - Unit: pre-forward failures emit request-level errors; forward-time TP faults

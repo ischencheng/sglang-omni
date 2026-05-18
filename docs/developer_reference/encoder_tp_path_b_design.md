@@ -1588,10 +1588,18 @@ class SGLangEncoderRunner:
         dist_addr = f"127.0.0.1:{port}"               # for ServerArgs
         dist_init_method = f"tcp://{dist_addr}"       # for torch init
 
-        # See "GPU placement across tp_size=1 and tp_size>1 lanes" for
-        # why this collapses to (0, tp_rank) once the launcher remaps
-        # CUDA_VISIBLE_DEVICES in both lanes.
-        cuda_device = 0
+        # GPU pinning depends on whether the launcher remapped
+        # CUDA_VISIBLE_DEVICES for this process. See
+        # "Launch path reconciliation with main" for the contract:
+        #   - tp_size > 1: launcher remaps CUDA_VISIBLE_DEVICES to the
+        #     single assigned physical GPU; the runner sees it as cuda:0.
+        #   - tp_size == 1, backend="sglang": no remap. The runner
+        #     sees the host's full CUDA device list and must pin
+        #     cuda_device to the resolved gpu_id factory kwarg.
+        if tp_size > 1:
+            cuda_device = 0
+        else:
+            cuda_device = int(gpu_id)
         dist_local_rank = tp_rank
         self.device = torch.device(f"cuda:{cuda_device}")
 
@@ -3110,13 +3118,20 @@ Phase 0 — landing path that doesn't break v1:
      extend and no single-process `compile_pipeline()` to reject from.
      The earlier obsolete plan that proposed those edits is superseded
      by the post-merge launcher topology.
-   - **TP preflight.** Inside `_build_stage_groups`
+   - **TP-launch-kwarg preflight.** Inside `_build_stage_groups`
      (`sglang_omni/pipeline/mp_runner.py:37`), run a two-layer
      preflight before any subprocess spawns:
-     - **Layer 1** — any stage with `tp_size > 1` must have a factory
-       whose signature accepts `tp_rank`, `tp_size`, and `nccl_port`.
-       This is the universal "TP-capable factory" check and applies
-       to thinker / talker / encoder uniformly.
+     - **Layer 1** — any stage that **will receive** TP launch
+       kwargs must have a factory whose signature accepts
+       `tp_rank`, `tp_size`, and `nccl_port`. The set of such
+       stages is `tp_size > 1 OR resolved backend == "sglang"` —
+       SGLang-backed `tp_size=1` encoders also receive
+       parent-allocated `nccl_port` and a `tp_rank=0, tp_size=1`
+       pair (the runner rejects `nccl_port=None`), so they must
+       advertise the same signature shape as a TP factory. A
+       single-rank SGLang encoder whose factory signature is
+       missing any of those three kwargs fails this preflight
+       before spawn.
      - **Layer 2 (backend-aware factories only)** — if the factory's
        signature contains a `backend` parameter (i.e. is one of the
        encoder factories `create_image_encoder_executor` /
@@ -3124,8 +3139,9 @@ Phase 0 — landing path that doesn't break v1:
        `tp_size > 1` ⇒ resolved `backend == "sglang"`. AR factories
        (`create_sglang_thinker_executor_from_config`,
        `create_talker_executor_from_config`) take TP launch params
-       but expose no `backend` parameter — they pass Layer 1
-       unchanged and are not subject to Layer 2.
+       but expose no `backend` parameter — they pass Layer 1 by
+       having TP kwargs in their signature and are not subject to
+       Layer 2.
    - **Parent-allocated `nccl_port`.** Allocate an `nccl_port` for
      every SGLang-backed stage, including `tp_size=1`, and pass it
      through resolved `factory_args`. Production
@@ -3683,26 +3699,38 @@ runtime_overrides)` — it does **not** take `stage_cfg`; the rule is
 the typed source is also set:
 
 ```python
+_BUDGET_KEY = "encoder_activation_budget_bytes"
+
 def reject_untyped_encoder_activation_budget_bytes(
     stage_name: str,
     factory_args: dict[str, Any],
     runtime_overrides: dict[str, Any],
 ) -> None:
-    if (
-        factory_args.get("encoder_activation_budget_bytes") is None
-        and runtime_overrides.get("encoder_activation_budget_bytes") is None
-    ):
+    # Check by key PRESENCE, not by truthiness / non-None value.
+    # A YAML stanza like `factory_args: {encoder_activation_budget_bytes: null}`
+    # would deserialize to `{"...": None}`; a non-None check would
+    # silently let it through, and the injection step skips the inject
+    # because the key is already present, leaving the factory with
+    # None and the admission cap disabled.
+    if _BUDGET_KEY not in factory_args and _BUDGET_KEY not in runtime_overrides:
         return
     raise ValueError(
-        f"Stage {stage_name!r} sets encoder_activation_budget_bytes "
-        "through factory_args/runtime_overrides; set "
-        "runtime.resources.encoder_activation_budget_bytes instead"
+        f"Stage {stage_name!r} sets {_BUDGET_KEY} through "
+        "factory_args/runtime_overrides; set "
+        f"runtime.resources.{_BUDGET_KEY} instead"
     )
 ```
 
-This is the same shape PR #430 uses for `total_gpu_memory_fraction`
-(`runtime.py:58-72`): typed source is the only valid path, untyped
-sources always fail. No new resolver shape, no new injection point —
+This is structurally the same as PR #430's
+`reject_untyped_total_gpu_memory_fraction` (`runtime.py:58-72`), but
+the check is `key in d`, not `d.get(key) is None`. The PR #430 helper
+relies on the field's None-default to suppress matches; encoder
+admission cannot rely on that because `null` in user-facing config
+files is a configuration mistake we want to surface, not silently
+accept. Typed source is the only valid path; any presence in an
+untyped source — including an explicit `null` — fails.
+
+No new resolver shape, no new injection point —
 one more field in an established mechanism.
 
 ## Launch path reconciliation with main
