@@ -273,8 +273,8 @@ requests can hang after the TP group is killed.
 - Partial-load checkpoint weights matching declared prefixes.
 - Expose `encode_batch(plan)`.
 
-Launcher / runner CUDA view depends on `tp_size`, matching the existing
-`get_stage_process_env` behaviour in `sglang_omni/pipeline/stage_process.py:297`:
+Launcher / runner CUDA view extends the existing `get_stage_process_env`
+behaviour in `sglang_omni/pipeline/stage_process.py:297`:
 
 - **`tp_size > 1`** — the launcher remaps `CUDA_VISIBLE_DEVICES` to the
   single assigned physical GPU before torch is imported. The runner sees
@@ -299,11 +299,12 @@ Launcher / runner CUDA view depends on `tp_size`, matching the existing
   Keeping `local_rank=0` recovers correct local-master and
   shard-slice behaviour.
 
-This split exists because the new `StageWorkerProcessSpec` topology
-(`sglang_omni/pipeline/stage_group.py:23-40`) lets a `tp_size=1` stage
-share an OS process with siblings, while a TP stage must own its process
-exclusively. Forcing the TP-only env remap onto every SGLang-backed
-stage would break the shared-process invariant.
+This launch contract depends on treating every SGLang-backed encoder
+stage as process-exclusive, even at `tp_size=1`. Local-only
+`tp_size=1` stages may still use the current shared-process path and
+leave `get_stage_process_env` as `{}`, but once a stage resolves to the
+SGLang backend it must use the single-device remap above so SGLang's
+CUDA index and node-local-rank assumptions stay aligned.
 
 ### SGLang-backed stages must own their OS process
 
@@ -618,8 +619,8 @@ Phase 0:
   regardless of `tp_size`. The runner then uses `cuda_device=0,
   dist_local_rank=tp_rank` uniformly across tp lanes (which is `0` at
   `tp_size=1`). Local-only `tp_size=1` stages keep the early-return
-  `{}`. The earlier "tp_size=1 no remap, pin cuda_device to gpu_id"
-  variant is retracted because it left `local_rank=gpu_id`, which
+  `{}`. The earlier direct physical-GPU pinning variant is retracted
+  because it left `local_rank=gpu_id`, which
   breaks SGLang's node-local-rank checks (local-master gating and
   checkpoint shard slicing assume `local_rank ∈ [0, world_size)`).
 - Allocate `nccl_port` in the parent for every SGLang-backed stage, including

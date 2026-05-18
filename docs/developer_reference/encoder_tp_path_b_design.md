@@ -48,11 +48,13 @@ updated before implementation.
 >   allows multiple stages to share an OS process, with the invariant
 >   that any `tp_size > 1` stage must own its process exclusively
 >   (`sglang_omni/pipeline/stage_group.py:23-40`).
->   `get_stage_process_env` still remaps `CUDA_VISIBLE_DEVICES` only for
->   `tp_size > 1`. The `single_visible_device: bool` flag proposed for
->   `tp_size=1 + backend="sglang"` is **not** added — the encoder
->   runner instead pins its `cuda_device` directly from the resolved
->   `gpu_id` factory kwarg. See
+>   Phase 0 widens `get_stage_process_env`'s single-device remap to
+>   every SGLang-backed encoder stage, including
+>   `tp_size=1 + backend in {"sglang", "auto"}`. The child sees only
+>   its assigned physical GPU, `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`
+>   is set, and the encoder runner uses `cuda_device=0` with
+>   `dist_local_rank=tp_rank` (`0` at `tp_size=1`). This replaces the
+>   earlier direct physical-GPU pinning variant. See
 >   [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
 >   for the corrected sequence.
 > - **Resolver.** `_resolve_factory_args` is renamed
@@ -417,7 +419,7 @@ import os
 
 import torch.distributed as dist
 from sglang.srt.utils import broadcast_pyobj
-from sglang_omni_v1.pipeline.relay_io import extract_tensors, restore_tensors
+from sglang_omni.pipeline.relay_io import extract_tensors, restore_tensors
 
 
 logger = logging.getLogger(__name__)
@@ -1220,36 +1222,16 @@ definitions remain upstream SGLang code.
 
 ### GPU placement across `tp_size=1` and `tp_size>1` lanes
 
-> **OBSOLETE (2026-05-17).** The contract in this entire subsection —
-> "runner always sees exactly one CUDA device as `cuda:0`, regardless
-> of `tp_size`", and the associated launcher-side `single_visible_device`
-> + `_resolve_factory_args` remap proposal in the
-> [Required launcher change](#required-launcher-change) subsection below
-> — is **not** implemented in Phase 0. The post-merge main has
-> `StageWorkerProcessSpec` topology that lets a non-TP stage share an
-> OS process with siblings, and an exclusivity invariant only for
-> `tp_size > 1` (`sglang_omni/pipeline/stage_group.py:23-40`). Forcing
-> every SGLang-backed stage through the TP-only env remap would break
-> the shared-process model. The current contract is:
->
-> - `tp_size > 1, backend="sglang"` → launcher remaps
->   `CUDA_VISIBLE_DEVICES` to one physical GPU; runner sees `cuda:0`;
->   `dist_local_rank=tp_rank`. Unchanged.
-> - `tp_size = 1, backend="sglang"` → **no** env remap. Runner sees
->   the host's full CUDA device list and pins `cuda_device` from the
->   resolved `gpu_id` factory kwarg. Stage owns its OS process
->   exclusively (see
->   [SGLang-backed stages must own their OS process](#sglang-backed-stages-must-own-their-os-process)).
->
-> The full reasoning and rules are in
-> [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
-> at the end of this file. The rest of this subsection (and the
-> [Required launcher change](#required-launcher-change) subsection
-> below) remains as design-history context but **do not implement it
-> as written**. Treat every reference to "always cuda:0" / "launcher
-> remaps at tp_size=1" / "single_visible_device" / "extend
-> `_resolve_factory_args` to set `spec.single_visible_device`" in the
-> obsolete prose as superseded.
+> **CURRENT (2026-05-17).** The runner-visible CUDA contract in this
+> subsection is still normative for SGLang-backed encoders: the launcher
+> remaps each child to one physical GPU, the runner sees that device as
+> `cuda:0`, and SGLang receives `dist_local_rank=tp_rank` (`0` at
+> `tp_size=1`). What is obsolete is only the earlier implementation
+> mechanism: adding a `single_visible_device` field and setting it from
+> `_resolve_factory_args`. The Phase 0 launcher derives the remap from
+> the resolved `backend in {"sglang", "auto"}` plus the
+> process-exclusivity rule described in
+> [Launch path reconciliation with main](#launch-path-reconciliation-with-main).
 
 This is a load-bearing detail because v1's per-process CUDA env remap
 in `pipeline/stage_process.py:222-249` is gated on `tp_size > 1`. The
@@ -1294,19 +1276,12 @@ local-master / shard-index slot, which is undefined for
 
 #### Required launcher change
 
-> **OBSOLETE (2026-05-17).** The proposal in this subsection —
-> `single_visible_device: bool = False` on `StageProcessSpec`,
-> extending `get_stage_process_env` to remap `CUDA_VISIBLE_DEVICES`
-> at `tp_size=1` for SGLang-backed stages, and the
-> resolver-side detection of `backend in {"sglang", "auto"}` — is
-> **not** implemented in Phase 0. The post-merge main has
-> `StageWorkerProcessSpec` topology that allows multiple stages to
-> share an OS process (`sglang_omni/pipeline/stage_process.py:90`),
-> and enforces "TP stages must own their OS process exclusively"
-> (`sglang_omni/pipeline/stage_group.py:23-40`). Forcing every
-> SGLang-backed `tp_size=1` stage through the TP-only env remap
-> would break the shared-process invariant. The corrected launch
-> contract is in
+> **OBSOLETE IMPLEMENTATION MECHANISM (2026-05-17).** The
+> `single_visible_device: bool = False` field and the
+> `_resolve_factory_args` change that injects it are not the Phase 0
+> implementation path. The Phase 0 launcher derives both process
+> exclusivity and the single-device remap from the resolved
+> `backend in {"sglang", "auto"}`. The corrected launch contract is in
 > [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
 > at the end of this file. The pseudocode below stays for
 > design-history context but **do not implement it as written**.
@@ -3067,7 +3042,7 @@ Fish stays on `SimpleScheduler` for preprocessing and `OmniScheduler` for
 
 Same pattern as Qwen3-Omni. As long as upstream SGLang exposes the encoder
 submodule classes and those modules use SGLang's TP-aware layers, the model
-ships a small `encoder_adapters.py` in `sglang_omni_v1/models/<name>/` with
+ships a small `encoder_adapters.py` in `sglang_omni/models/<name>/` with
 `EncoderModuleSpec` declarations and payload transforms. The pipeline config
 then just sets `backend="sglang"` and `tp_size`.
 
@@ -3846,8 +3821,8 @@ Where the check belongs:
 
 What this rule does **not** require:
 
-- Forcing an env remap. `tp_size=1, backend="sglang"` still uses the
-  no-remap path described above.
+- A user-visible `single_visible_device` config or schema field. The
+  launcher derives the required remap from the resolved backend.
 - Forbidding co-location at the **GPU** level. Two SGLang-backed
   encoder stages on the same GPU are fine as long as they live in
   separate OS processes (the existing PR #430 colocation memory
