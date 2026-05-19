@@ -240,8 +240,7 @@ def create_sglang_tts_engine_executor(
     gpu_id = int(device.split(":")[-1]) if ":" in device else 0
 
     overrides: dict[str, Any] = {
-        # Per-request slot state + Python decode loop are not graph-capturable.
-        "disable_cuda_graph": True,
+        "disable_cuda_graph": False,
         "mem_fraction_static": 0.85,
         "max_running_requests": 16,
         "chunked_prefill_size": 8192,
@@ -259,6 +258,9 @@ def create_sglang_tts_engine_executor(
         **overrides,
     )
     server_args.disable_overlap_schedule = True
+    want_cuda_graph = not bool(getattr(server_args, "disable_cuda_graph", False))
+    if want_cuda_graph:
+        server_args.disable_cuda_graph = True
 
     (
         model_worker,
@@ -271,6 +273,14 @@ def create_sglang_tts_engine_executor(
     ) = create_sglang_infrastructure(server_args, gpu_id)
 
     truncate_rope_to_bf16(model_worker.model_runner.model)
+    if hasattr(model_worker.model_runner.model, "init_decode_graph_buffers"):
+        model_worker.model_runner.model.init_decode_graph_buffers(
+            req_to_token_pool.size,
+            torch.device(f"cuda:{gpu_id}"),
+        )
+    if want_cuda_graph:
+        server_args.disable_cuda_graph = False
+        model_worker.model_runner.init_device_graphs()
 
     output_proc = SGLangOutputProcessor(
         capture_hidden=False,

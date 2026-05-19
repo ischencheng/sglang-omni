@@ -25,10 +25,10 @@ from dataclasses import dataclass
 
 import torch
 
-from sglang_omni.models.higgs_tts.utils import BOC_ID, EOC_ID
-
 # Sentinel returned by ``step`` after ``generation_done``; engine treats as stop.
 STOP_CODE = -1
+BOC_ID = 1024
+EOC_ID = 1025
 
 
 @dataclass
@@ -136,4 +136,4 @@ def step(
     return codes_N
 
 
-__all__ = ["STOP_CODE", "HiggsSamplerState", "step"]
+__all__ = ["BOC_ID", "EOC_ID", "STOP_CODE", "HiggsSamplerState", "step"]

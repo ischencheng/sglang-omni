@@ -22,6 +22,9 @@ from typing import Any
 import torch
 
 from sglang_omni.model_runner.base import ModelRunner
+from sglang_omni.models.higgs_tts.model import HiggsGenParams
+from sglang_omni.models.higgs_tts.sampler import STOP_CODE
+from sglang_omni.models.higgs_tts.sampler import step as sampler_step
 from sglang_omni.models.higgs_tts.text_tokenizer import AUDIO_PLACEHOLDER_ID
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,14 @@ class HiggsTTSModelRunner(ModelRunner):
     def prepare_decode(self, forward_batch, schedule_batch, requests):
         del schedule_batch
         forward_batch.req_ids = [req.request_id for req in requests]
+        req_pool_indices = getattr(forward_batch, "req_pool_indices", None)
+        if req_pool_indices is not None and hasattr(
+            self.model, "update_decode_graph_buffer"
+        ):
+            self.model.update_decode_graph_buffer(
+                req_pool_indices,
+                forward_batch.req_ids,
+            )
         return None
 
     def post_decode(self, result, forward_batch, schedule_batch, requests):
@@ -103,13 +114,31 @@ class HiggsTTSModelRunner(ModelRunner):
 
         model = self.model
         cb0_per_row: list[int] = []
-        for sched_req in requests:
+        logits = result.logits_output.next_token_logits
+        for row, sched_req in enumerate(requests):
             data = sched_req.data
             req = data.req
-            slot = model._slots.get(sched_req.request_id)
-            if req.is_chunked > 0 or slot is None or not slot.output_codes:
+            if req.is_chunked > 0:
                 cb0_per_row.append(0)
                 continue
+
+            slot = model.get_slot(sched_req.request_id)
+            params = self._gen_params(data)
+            codes_N = sampler_step(
+                logits[row],
+                slot.sampler,
+                temperature=params.temperature,
+                top_p=params.top_p,
+                top_k=params.top_k,
+            )
+            if int(codes_N[0].item()) != STOP_CODE:
+                slot.output_codes.append(codes_N.detach().to(torch.long))
+
+            if not slot.output_codes:
+                cb0_per_row.append(0)
+                data.generation_done = bool(slot.sampler.generation_done)
+                continue
+
             codes_N = slot.output_codes[-1]
             data.output_codes.append(codes_N.detach().cpu().clone())
             data.generation_done = bool(slot.sampler.generation_done)
@@ -119,6 +148,16 @@ class HiggsTTSModelRunner(ModelRunner):
             cb0_per_row,
             dtype=torch.long,
             device=result.logits_output.next_token_logits.device,
+        )
+
+    @staticmethod
+    def _gen_params(data: Any) -> HiggsGenParams:
+        top_p = getattr(data, "top_p", None)
+        top_k = getattr(data, "top_k", None)
+        return HiggsGenParams(
+            temperature=float(getattr(data, "temperature", 1.0)),
+            top_p=None if top_p is None or float(top_p) >= 1.0 else float(top_p),
+            top_k=None if top_k is None or int(top_k) <= 0 else int(top_k),
         )
 
 

@@ -23,8 +23,7 @@ from sglang_omni.models.higgs_tts.modeling import (
     HiggsFusedMultiTextEmbedding,
     HiggsFusedMultiTextHead,
 )
-from sglang_omni.models.higgs_tts.sampler import STOP_CODE, HiggsSamplerState
-from sglang_omni.models.higgs_tts.sampler import step as sampler_step
+from sglang_omni.models.higgs_tts.sampler import HiggsSamplerState
 from sglang_omni.models.higgs_tts.weight_loader import DiscreteWeightMapper
 
 # Higgs ckpt prefixes → sglang Qwen3ForCausalLM parameter tree (under ``backbone.``).
@@ -115,6 +114,8 @@ class HiggsTTSModel(nn.Module):
         self._num_codebooks = num_codebooks
         self._codebook_vocab_size = vocab_size
         self._tie_modality = bool(enc_cfg.get("tie_word_embeddings", True))
+        self._decode_codes_buffer: torch.Tensor | None = None
+        self._decode_has_codes_buffer: torch.Tensor | None = None
 
         self.multimodal_embedding = _HiggsMultimodalEmbedding(
             num_codebooks=num_codebooks,
@@ -166,6 +167,44 @@ class HiggsTTSModel(nn.Module):
     def reset_request(self, req_id: str) -> None:
         self._slots.pop(req_id, None)
 
+    def init_decode_graph_buffers(self, max_reqs: int, device: torch.device) -> None:
+        """Allocate request-pool-indexed decode inputs for CUDA graph replay."""
+        self._decode_codes_buffer = torch.zeros(
+            (max_reqs, self._num_codebooks), dtype=torch.long, device=device
+        )
+        self._decode_has_codes_buffer = torch.zeros(
+            (max_reqs,), dtype=torch.bool, device=device
+        )
+
+    def update_decode_graph_buffer(
+        self,
+        req_pool_indices: torch.Tensor,
+        req_ids: list[str],
+    ) -> None:
+        """Copy per-request last codebook rows into graph-visible buffers."""
+        if self._decode_codes_buffer is None or self._decode_has_codes_buffer is None:
+            return
+
+        if not req_ids:
+            return
+
+        device = self._decode_codes_buffer.device
+        indices = req_pool_indices[: len(req_ids)].to(device=device, dtype=torch.long)
+        codes = torch.zeros(
+            (len(req_ids), self._num_codebooks), dtype=torch.long, device=device
+        )
+        has_codes = torch.zeros((len(req_ids),), dtype=torch.bool, device=device)
+        for i, rid in enumerate(req_ids):
+            slot = self._slots.get(rid)
+            last = None if slot is None else slot.sampler.last_codes
+            if last is None:
+                continue
+            codes[i].copy_(last.to(device=device, dtype=torch.long))
+            has_codes[i] = True
+
+        self._decode_codes_buffer[indices] = codes
+        self._decode_has_codes_buffer[indices] = has_codes
+
     def get_output_codes(self, req_id: str) -> torch.Tensor:
         slot = self._slots.get(req_id)
         if slot is None or not slot.output_codes:
@@ -175,52 +214,6 @@ class HiggsTTSModel(nn.Module):
                 device=self.multimodal_embedding.modality_embedding_0.weight.device,
             )
         return torch.stack(slot.output_codes, dim=0).to(torch.long)
-
-    @torch.no_grad()
-    def decode_codebooks_batch(
-        self,
-        hidden_states_BD: torch.Tensor,
-        req_ids: list[str],
-        gen_params: list[HiggsGenParams],
-    ) -> torch.Tensor:
-        """Sample multi-codebook tokens for one forward step.
-
-        Real codes land in ``self._slots[req_id].output_codes``; the returned
-        text-vocab logits are a structural placeholder that sglang's downstream
-        sampler walks over but whose ``next_token_ids`` are discarded by
-        :class:`HiggsTTSModelRunner`.
-        """
-        batch_size = hidden_states_BD.shape[0]
-        if len(req_ids) != batch_size or len(gen_params) != batch_size:
-            raise ValueError(
-                f"batch size mismatch: hidden={batch_size}, "
-                f"req_ids={len(req_ids)}, gen_params={len(gen_params)}"
-            )
-
-        # fp32 for softmax numerical stability.
-        logits_BNV = self.modality_head.generate(hidden_states_BD).to(torch.float32)
-
-        for b in range(batch_size):
-            slot = self.get_slot(req_ids[b])
-            params = gen_params[b]
-            codes_N = sampler_step(
-                logits_BNV[b],
-                slot.sampler,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                top_k=params.top_k,
-            )
-            # STOP_CODE sentinel rows can arrive if a finished request is
-            # accidentally re-stepped; guard so output_codes stays clean.
-            if int(codes_N[0].item()) != STOP_CODE:
-                slot.output_codes.append(codes_N.detach().to(torch.long))
-
-        text_vocab_size = self.backbone.config.vocab_size
-        return torch.zeros(
-            (batch_size, text_vocab_size),
-            device=hidden_states_BD.device,
-            dtype=torch.float32,
-        )
 
     def forward(
         self,
@@ -235,12 +228,11 @@ class HiggsTTSModel(nn.Module):
         Prefill: caller supplies ``input_embeds`` with the ref-audio overlay
         already pasted at ``-100`` positions (see
         :class:`HiggsTTSModelRunner._build_prefill_input_embeds`).
-        Decode: input_embeds is rebuilt here from each slot's ``last_codes``.
+        Decode: input_embeds is rebuilt here from graph-visible request-pool
+        buffers when available, otherwise from each slot's ``last_codes``.
         """
-        req_ids, gen_params = self._extract_batch_metadata(forward_batch)
-
         if input_embeds is None and self._is_decode_step(forward_batch):
-            input_embeds = self._decode_step_embeds(req_ids, input_ids)
+            input_embeds = self._decode_step_embeds(forward_batch, input_ids)
 
         hidden_states = self.backbone.model(
             input_ids,
@@ -261,12 +253,14 @@ class HiggsTTSModel(nn.Module):
             if hidden_states_last.ndim == 3:
                 hidden_states_last = hidden_states_last[:, -1, :]
 
-        text_logits_BV = self.decode_codebooks_batch(
-            hidden_states_last, req_ids, gen_params
+        # fp32 for sampler numerical stability. Sampling and slot mutation stay
+        # outside model.forward so CUDA graph replay only covers tensor work.
+        codebook_logits_BNV = self.modality_head.generate(hidden_states_last).to(
+            torch.float32
         )
 
         return LogitsProcessorOutput(
-            next_token_logits=text_logits_BV,
+            next_token_logits=codebook_logits_BNV,
             hidden_states=hidden_states_last,
         )
 
@@ -318,35 +312,50 @@ class HiggsTTSModel(nn.Module):
             return int(seq_lens.shape[0])
         return int(getattr(forward_batch, "batch_size", 1))
 
-    def _decode_step_embeds(
-        self, req_ids: list[str], input_ids: torch.Tensor
-    ) -> torch.Tensor:
+    def _decode_step_embeds(self, forward_batch, input_ids: torch.Tensor) -> torch.Tensor:
         """Build per-step embeddings from each slot's ``last_codes``.
 
         Falls back to the text embedding for any request whose slot has no
         ``last_codes`` yet (scheduler may send us a token before we've decoded).
         """
         device = input_ids.device
-        N = self._num_codebooks
-        last_codes_stack: list[torch.Tensor] = []
-        mask: list[bool] = []
-        for rid in req_ids:
-            slot = self._slots.get(rid)
-            last = None if slot is None else slot.sampler.last_codes
-            if last is None:
-                last_codes_stack.append(torch.zeros(N, dtype=torch.long, device=device))
-                mask.append(False)
-            else:
-                last_codes_stack.append(last.to(device=device, dtype=torch.long))
-                mask.append(True)
-        codes_BN = torch.stack(last_codes_stack, dim=0)
+        req_pool_indices = getattr(forward_batch, "req_pool_indices", None)
+        if (
+            self._decode_codes_buffer is not None
+            and self._decode_has_codes_buffer is not None
+            and req_pool_indices is not None
+        ):
+            indices = req_pool_indices.to(
+                device=self._decode_codes_buffer.device, dtype=torch.long
+            )
+            codes_BN = self._decode_codes_buffer[indices].to(device=device)
+            mask_t = self._decode_has_codes_buffer[indices].to(device=device).unsqueeze(
+                -1
+            )
+        else:
+            req_ids, _ = self._extract_batch_metadata(forward_batch)
+            last_codes_stack: list[torch.Tensor] = []
+            mask: list[bool] = []
+            for rid in req_ids:
+                slot = self._slots.get(rid)
+                last = None if slot is None else slot.sampler.last_codes
+                if last is None:
+                    last_codes_stack.append(
+                        torch.zeros(self._num_codebooks, dtype=torch.long, device=device)
+                    )
+                    mask.append(False)
+                else:
+                    last_codes_stack.append(last.to(device=device, dtype=torch.long))
+                    mask.append(True)
+            codes_BN = torch.stack(last_codes_stack, dim=0)
+            mask_t = torch.tensor(mask, device=device).unsqueeze(-1)
+
         fused_embeds = self.multimodal_embedding.modality_embedding_0(codes_BN)
 
         text_embeds = self.backbone.model.embed_tokens(input_ids)
         if text_embeds.ndim == 3:
             text_embeds = text_embeds[:, -1, :]
 
-        mask_t = torch.tensor(mask, device=device).unsqueeze(-1)
         return torch.where(mask_t, fused_embeds.to(text_embeds.dtype), text_embeds)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> set[str]:
