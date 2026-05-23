@@ -8,7 +8,7 @@ separate encoder copies under `models/<name>/components/`.
 
 This lean draft is the normative design contract for #375. Detailed Python
 sketches, per-key server-argument protection, and assertion-level test plans
-belong in Phase 0 PR code comments or non-normative implementation notes.
+belong in Encoder TP PR code comments or non-normative implementation notes.
 
 For the detailed implementation notes behind these contracts, see
 [`encoder_tp_path_b_design.md`](encoder_tp_path_b_design.md). If the two
@@ -52,6 +52,9 @@ encoder stage, but the primary scaling target is activation memory.
 - Do not make `SimpleScheduler` TP-aware.
 - Do not use `worker` / `executor` vocabulary for new encoder path classes.
   The new SGLang-backed component is a runner.
+- Do not infer memory budgets in the Encoder TP PR. SGLang-style startup
+  heuristics for deriving Omni stage-budget defaults and profile /
+  benchmark-based auto tuning are follow-up work.
 
 ## Architecture
 
@@ -151,13 +154,13 @@ model and talker weights that belong to other pipeline stages. Loading it in
 each encoder process would erase the memory win from moving long media
 activations off the thinker GPU.
 
-Phase 0 should implement partial encoder-submodule loading inside
+The Encoder TP PR should implement partial encoder-submodule loading inside
 SGLang-Omni. Each adapter declares the encoder module specs it needs, including
 checkpoint prefixes and any key rewrites. `SGLangEncoderRunner` builds only
 those submodules and loads only matching checkpoint keys. This keeps the
 implementation unblocked without waiting for an upstream SGLang loader API.
 
-After Phase 1 parity and fault-handling validation, we should propose an
+After parity and fault-handling validation, we should propose an
 upstream helper such as `EncoderModelRunner` / partial encoder loader so future
 models can reuse the same submodule-loading contract directly from SGLang.
 
@@ -168,7 +171,7 @@ the per-component sizing table and the partial-load pipeline:
 
 ## Upstream Compatibility Contract
 
-Phase 0 may use a local `SGLangEncoderRunner` shim, but the shim has a bounded
+The Encoder TP PR may use a local `SGLangEncoderRunner` shim, but the shim has a bounded
 upstream dependency surface. Omni may depend on:
 
 - SGLang distributed setup: `init_distributed_environment`,
@@ -193,11 +196,11 @@ implementation:
 - Audio length: `_get_feat_extract_output_lengths(input_lengths)` returns the
   post-encoder output lengths used to slice `audio_embeds`.
 
-Phase 0 compatibility is pinned to the SGLang commit/version exercised in CI.
+Encoder TP compatibility is pinned to the SGLang commit/version exercised in CI.
 Tracking SGLang main is acceptable only if CI imports every allowed symbol,
 instantiates Qwen3-Omni image/audio encoder modules at `tp_size=1`, verifies
 partial loading only accepts declared prefixes, and runs adapter smoke tests
-that validate output shapes. If Phase 0 needs an upstream API outside this
+that validate output shapes. If the Encoder TP PR needs an upstream API outside this
 allowlist, it must either wrap it behind the local compatibility shim or first
 upstream a helper before depending on it directly.
 
@@ -322,7 +325,7 @@ guards against re-init with a module-level
 `assert _TP is None`. The second SGLang-backed runner in the same
 process would hit that assertion and abort the process.
 
-Phase 0 rule: **any stage with `backend in {"sglang", "auto"}` must
+Encoder TP rule: **any stage with `backend in {"sglang", "auto"}` must
 own its OS process exclusively**, regardless of `tp_size`. The
 condition is "any process group containing a SGLang-backed stage has
 exactly one member" — sharing with another SGLang stage and sharing
@@ -374,7 +377,7 @@ when model execution failed.
 
 ## Admission Contract
 
-Activation-budget admission is part of Phase 0 for both image/video and audio.
+Activation-budget admission is part of the Encoder TP PR for both image/video and audio.
 It runs only on the entry rank before TP fan-out; non-entry ranks execute the
 already-admitted batch and never make independent admission decisions.
 
@@ -382,12 +385,12 @@ already-admitted batch and never make independent admission decisions.
   plus estimated visual output/deepstack bytes, multiplied by a calibrated
   activation factor.
 - Audio must not use `request_cost_fn = 0` or `max_batch_cost = None` in the
-  SGLang backend. It needs a conservative audio budget from Phase 0.
+  SGLang backend. It needs a conservative audio budget from the Encoder TP PR.
 - Audio cost should be batch-aware because the input preparer right-pads
   `input_features` and `feature_attention_mask` to the maximum time dimension
   in the selected batch. A safe estimate includes padded input bytes, padded mask
   bytes, output bytes from `_get_feat_extract_output_lengths`, and an activation
-  multiplier. The canonical formula and the Phase 0 multiplier default live in
+  multiplier. The canonical formula and the Encoder TP multiplier default live in
   the detailed RFC — see
   [`encoder_tp_path_b_design.md` → Audio admission model](encoder_tp_path_b_design.md#audio-admission-model).
 - `request_cost_fn` and `batch_cost_fn` are invoked from the scheduler hot path
@@ -408,10 +411,10 @@ already-admitted batch and never make independent admission decisions.
 
 Encoder TP reuses the existing typed `StageRuntimeConfig` /
 `StageResourceConfig` shape introduced for colocation (PR #430,
-`sglang_omni/config/schema.py:45-103`). Phase 0 adds one
-admission-only field — `encoder_activation_budget_bytes` —
-under `runtime.resources`. It does **not** introduce a new
-top-level `StageMemoryConfig`:
+`sglang_omni/config/schema.py:45-103`). The Encoder TP PR adds one
+encoder temporary-admission field —
+`encoder_activation_budget_bytes` — under `runtime.resources`. It does
+**not** introduce a new top-level `StageMemoryConfig`:
 
 ```python
 StageConfig(
@@ -424,15 +427,13 @@ StageConfig(
     },
     runtime=StageRuntimeConfig(
         resources=StageResourceConfig(
-            # Existing field (PR #430): per-rank cap as a fraction of total
-            # physical GPU memory. Drives co-location admission and AR
-            # `_profile_available_bytes_from_process_memory`.
+            # Existing field (PR #430): per-rank/process resident/static
+            # placement budget as a fraction of total physical GPU memory.
+            # For AR stages it also bounds KV headroom through PR #430.
             total_gpu_memory_fraction=0.20,
-            # NEW (this RFC): encoder-only admission cap, in bytes. Drives
-            # `EncoderScheduler.max_batch_cost` (image / video / audio
-            # activation peaks). Independent of `total_gpu_memory_fraction`
-            # because admission caps batch size by activation footprint,
-            # not by static allocator budget.
+            # NEW (this RFC): encoder temporary activation admission guard,
+            # in bytes. Drives `EncoderScheduler.max_batch_cost` and also
+            # participates in GPU-level dynamic reserve validation.
             encoder_activation_budget_bytes=20 * 1024**3,
         ),
     ),
@@ -444,8 +445,8 @@ StageConfig(
 
 The factory-args resolver (`sglang_omni/config/runtime.py:resolve_stage_factory_args`)
 already injects `total_gpu_memory_fraction` into the factory signature
-after merging `factory_args` + `runtime_overrides`, and Phase 0 extends
-it with the same shape for `encoder_activation_budget_bytes`:
+after merging `factory_args` + `runtime_overrides`, and the Encoder TP
+PR extends it with the same shape for `encoder_activation_budget_bytes`:
 
 - If the resolved factory has `encoder_activation_budget_bytes` in its
   signature, inject
@@ -481,28 +482,40 @@ Launcher rules:
   (`sglang_omni/pipeline/runtime_config.py:78`), which builds the
   placement plan and process-topology plan; per-process spawn is
   driven by `_build_stage_groups`
-  (`sglang_omni/pipeline/mp_runner.py:37`). Encoder TP Phase 0
+  (`sglang_omni/pipeline/mp_runner.py:37`). Encoder TP
   validation hooks into those three call sites instead of a
   vanished `compile_pipeline()`.
+- `prepare_pipeline_runtime` builds a stage launch-mode map before
+  process topology. The map is computed from `StageConfig.factory_args`
+  plus typed runtime overrides; factory defaults that affect launch mode
+  are not a valid source of truth. The same map feeds topology
+  validation, `_build_stage_groups`, SGLang process exclusivity,
+  environment remap, TP preflight, and `nccl_port` allocation. For
+  `backend="auto"`, the map records both the requested backend
+  (`"auto"`) and the resolved execution backend (`"sglang"` or
+  `"local"`).
 - TP-launch-kwarg preflight runs inside `_build_stage_groups` and
   applies to **every stage that will receive TP launch kwargs** —
-  `tp_size > 1` **or** resolved `backend in {"sglang", "auto"}`
+  `tp_size > 1` **or** launch-mode `backend in {"sglang", "auto"}`
   (including single-rank SGLang encoders, which also receive a
   parent-allocated `nccl_port` and `tp_rank=0, tp_size=1`). Any such
   factory whose signature does not accept `tp_rank/tp_size/nccl_port`
   fails preflight before spawn. `auto` is included alongside `sglang`
-  because Phase 2 makes `auto` resolve to SGLang for adapters that
-  support it; a single-rank `auto` encoder must therefore advertise
+  because `auto` may resolve to SGLang for adapters that support it;
+  a single-rank `auto` encoder must therefore advertise
   the same factory signature shape so its SGLang code path receives a
   valid `nccl_port` instead of `None`. A second layer applies only to
-  backend-aware factories: `tp_size > 1` ⇒ resolved
-  `backend == "sglang"`. AR factories (thinker/talker) take TP
+  backend-aware factories: `tp_size > 1` ⇒ resolved execution
+  backend is `"sglang"`. Therefore `backend="auto", tp_size > 1`
+  passes only when auto-resolution selects SGLang; if it resolves to
+  local, it fails the same way as explicit `backend="local"`. AR
+  factories (thinker/talker) take TP
   launch params without a `backend` parameter and pass through
   Layer 1 unchanged.
 - Process exclusivity for SGLang-backed stages is enforced in
   `build_process_topology_plan`
   (`sglang_omni/config/topology.py:36`): any process group that
-  contains a stage with resolved `backend in {"sglang", "auto"}`
+  contains a stage with launch-mode `backend in {"sglang", "auto"}`
   must have exactly one member.
 - The parent runner allocates an `nccl_port` for every SGLang-backed
   stage (including `tp_size=1`) inside `_build_stage_groups`;
@@ -510,57 +523,108 @@ Launcher rules:
 
 ## Memory And Co-Location Contract
 
-Encoder and thinker ranks may share the same physical GPU in Phase 0.
-PR #430 already implemented the runtime mechanism: each stage declares
-`runtime.resources.total_gpu_memory_fraction`, and
-`SGLModelRunner._profile_available_bytes` computes KV headroom as
-`total_memory * fraction - process_used` for colocated AR stages
-(`sglang_omni/model_runner/sglang_model_runner.py:99-141`,
-`sglang_omni/utils/gpu_memory.py`). The runner picks one of three paths
-at load time:
+Encoder TP supports colocating thinker, talker, encoder, and code2wav
+processes on the same physical GPU, but memory ownership is explicit.
 
-- NVML process-scoped accounting when host PID visibility allows it
-  (preferred);
-- a serialized stage-load delta under the same-GPU startup lock when
-  NVML cannot identify the current process;
-- upstream SGLang free-memory-delta accounting when no
-  `total_gpu_memory_fraction` is set (non-colocated path).
+In upstream single-engine SGLang, `mem_fraction_static = y` is the
+model-weights-plus-KV budget, while `1 - y` is left for activations,
+CUDA graph buffers, workspace, and other same-GPU applications. The
+core sizing formula is:
 
-This RFC reuses that mechanism unchanged. The encoder Phase 0 work
-adds **only**:
+```text
+rest_memory =
+    post_model_load_memory - pre_model_load_memory * (1 - mem_fraction_static)
+```
 
-1. Encoder stages declare `runtime.resources.total_gpu_memory_fraction`
-   the same way thinker / talker do today. The planner sums per-GPU
-   budgets, rejects over-allocation pre-spawn (existing PR #430 logic
-   in `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`).
-2. Encoder stages declare a separate
-   `runtime.resources.encoder_activation_budget_bytes` for
-   `EncoderScheduler.max_batch_cost`. This is admission control for
-   batch *formation*; it has no relation to weight footprint or
-   `mem_fraction_static`, so it must be a distinct field rather than a
-   derived fraction.
+That assumes one SGLang engine owns the GPU. Omni colocation breaks
+that assumption: the physical GPU may host thinker, talker_ar,
+image_encoder, audio_encoder, and code2wav processes, so
+`1 - mem_fraction_static` can no longer be interpreted as the AR
+stage's private dynamic reserve.
 
-There is no new `StageMemoryConfig`, no per-GPU readiness barrier
-between encoder and AR, no `planned_available_bytes_after_encoder_load`
-formula, and no planner-side `mem_fraction_static` reservation logic.
-PR #430's `_profile_available_bytes_from_process_memory` reads the
-*actual* process-scoped memory at load time, so it handles spawn /
-load-order non-determinism by measurement rather than by enforcement.
-The encoder runner is a regular colocated AR-class process from the
-runtime's point of view.
+`runtime.resources.total_gpu_memory_fraction` is the per-rank/process
+resident/static placement budget for every GPU stage. It accounts for
+weights, KV cache, persistent buffers, GPU-resident encoder cache, and
+vocoder steady state. It is **not** a peak memory cap. After TP rank
+expansion, the planner sums resident budgets per physical GPU.
 
-Interaction with user-set `mem_fraction_static`:
+For AR stages, the colocated adapter mirrors
+`total_gpu_memory_fraction` into SGLang `mem_fraction_static` for
+compatibility, but PR #430 changes KV sizing to use a process-scoped
+stage budget:
 
-PR #430 already routes `mem_fraction_static` through
-`runtime.sglang_server_args.mem_fraction_static`
-(`sglang_omni/config/schema.py:67-79`). The encoder runner does not
-own a KV pool, so it does not set this field. If a user pins
-`mem_fraction_static` on the *thinker* stage, the existing PR #430
-adapter applies the pin verbatim and skips the auto-fraction
-`apply_encoder_mem_reserve` path. The encoder runner's
-`total_gpu_memory_fraction` is independent — it bounds the encoder's
-own process_used and does not interact with the thinker's KV reserve
-arithmetic.
+```text
+stage_budget_bytes = physical_gpu_total_bytes * total_gpu_memory_fraction
+available_for_kv = stage_budget_bytes - measured_ar_process_memory
+```
+
+These are not two multiplicative limits. `total_gpu_memory_fraction`
+is the Omni resident placement budget; `mem_fraction_static` is the
+SGLang compatibility parameter.
+
+For non-AR encoder and code2wav stages,
+`total_gpu_memory_fraction` is placement-side resident budgeting only.
+It does not install a runtime allocator cap, and code2wav has no
+`mem_fraction_static`.
+
+Dynamic memory is a GPU-level shared resource:
+
+```text
+shared_dynamic_headroom_bytes =
+    physical_gpu_total_bytes * (
+        max_total_gpu_memory_fraction_per_gpu - resident_fraction_sum
+    )
+```
+
+That headroom must cover AR activation peaks, CUDA graph buffers,
+workspace, encoder temporary activations, code2wav temporary peaks,
+NCCL / allocator fragmentation, and safety margin. The Encoder TP PR
+therefore validates dynamic reserves before launch:
+
+```text
+sum(stage_resident_budget_bytes_on_gpu)
++ sum(resolved_dynamic_reserve_bytes_on_gpu)
+<= physical_gpu_total_bytes * max_total_gpu_memory_fraction_per_gpu
+```
+
+Equivalently, `encoder_activation_budget_bytes` plus resolved AR,
+code2wav, and miscellaneous dynamic reserve assumptions must fit in
+the shared dynamic headroom. This prevents a configuration that assigns
+all GPU memory to resident stage budgets and leaves no space for
+activations.
+
+For the Encoder TP PR, non-encoder dynamic reserves come from calibrated
+model-config assumptions or advanced typed overrides. Do not expose
+`thinker_activation_budget_bytes` / `talker_activation_budget_bytes` as
+ordinary user-facing primary knobs; long term, a placement-aware startup
+heuristic should derive them from model, topology, and runtime settings.
+Here, "calibrated assumptions" means compile-time hard-coded constants
+for a known `(model, hardware)` profile, not runtime inference; this is
+why they do not conflict with the non-goal of avoiding budget inference
+in the Encoder TP PR.
+
+`encoder_activation_budget_bytes` is the Encoder TP admission guard for
+image / video / audio temporary activation peaks. It caps encoder batch
+formation through `EncoderScheduler.max_batch_cost` and participates in
+dynamic reserve validation. It is a bridge field for this PR, not the
+long-term user-facing memory split API.
+
+The Encoder TP PR does not infer budgets. It consumes explicit typed
+budgets, rejects ambiguous legacy/untyped paths, and logs the resolved
+resident and dynamic budgets at startup. SGLang-style startup
+heuristics for deriving Omni stage-budget defaults, and profile /
+benchmark-based auto tuning, are follow-up work.
+
+`encoder_mem_reserve` is a pre-#430 bridge: it subtracts an external
+encoder reserve from SGLang's auto-picked AR `mem_fraction_static`.
+It is not part of the Encoder TP contract. Configs using typed
+`runtime.resources.total_gpu_memory_fraction` must not also set a
+nonzero `encoder_mem_reserve`. The current Qwen thinker factory default
+`encoder_mem_reserve=0.05` must be removed or changed to `0.0` in the
+Encoder TP implementation. Legacy reserve behavior is allowed only when
+nonzero `encoder_mem_reserve` is explicitly configured on the legacy
+non-typed path; typed-budget configs must ignore the old default and
+reject any explicit nonzero value.
 
 See [`encoder_tp_path_b_design.md` → Memory accounting reuses PR #430](encoder_tp_path_b_design.md#memory-accounting-reuses-pr-430)
 for the line-by-line walk through `SGLModelRunner._profile_available_bytes`
@@ -568,12 +632,12 @@ and the deletion of the obsolete planner-side reserve plumbing.
 
 ## Naming
 
-Use these names in the Phase 0 implementation:
+Use these names in the Encoder TP implementation:
 
 - `SGLangEncoderRunner`, not `SGLangEncoderWorker` (new class, new file).
 - Existing factory names stay: `create_image_encoder_executor` and
   `create_audio_encoder_executor`
-  (`sglang_omni/models/qwen3_omni/stages.py:781,823`). Phase 0 extends
+  (`sglang_omni/models/qwen3_omni/stages.py:781,823`). The Encoder TP PR extends
   them with `backend: Literal["local", "sglang", "auto"] = "local"`
   rather than renaming. Renaming would require migrating
   `sglang_omni/models/qwen3_omni/config.py:45,59` and any cookbook
@@ -594,7 +658,7 @@ Use these names in the Phase 0 implementation:
 
 ## Rollout
 
-Phase 0:
+Encoder TP PR scope:
 
 - Add `SGLangEncoderRunner`.
 - Add `EncoderScheduler`.
@@ -603,18 +667,23 @@ Phase 0:
   `create_audio_encoder_executor` factories with
   `backend: Literal["local", "sglang", "auto"] = "local"`. Default
   stays `"local"`; the factory body routes to `SGLangEncoderRunner` +
-  `EncoderScheduler` when resolved backend is `"sglang"`.
+  `EncoderScheduler` when the resolved execution backend is `"sglang"`.
 - Add conservative image/video and audio activation admission, including
   single-request guards.
 - Add `runtime.resources.encoder_activation_budget_bytes` field on
-  `StageResourceConfig` (admission-only; reuse PR #430's
-  `total_gpu_memory_fraction` for placement-side budgeting).
+  `StageResourceConfig` and include it in dynamic reserve validation.
 - Extend `resolve_stage_factory_args` to inject the new field and reject
   duplicates in `factory_args` / `runtime_overrides`, using the same shape
   as the existing `total_gpu_memory_fraction` injection.
+- Build the stage launch-mode map before topology so topology,
+  launcher preflight, process exclusivity, SGLang env remap, and
+  `nccl_port` allocation all use the same backend decision.
+- Add GPU-level dynamic headroom validation:
+  resident budgets plus resolved dynamic reserves must fit under
+  `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`.
 - Add launcher validation for SGLang-backed encoder stages. Widen
   `get_stage_process_env`'s existing TP remap branch so any stage with
-  resolved `backend in {"sglang", "auto"}` gets the single-device shape
+  launch-mode `backend in {"sglang", "auto"}` gets the single-device shape
   (`CUDA_VISIBLE_DEVICES=<one>` + `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`)
   regardless of `tp_size`. The runner then uses `cuda_device=0,
   dist_local_rank=tp_rank` uniformly across tp lanes (which is `0` at
@@ -628,22 +697,17 @@ Phase 0:
 - Add fatal-path plumbing: a non-zero TP child exit tears down the stage group
   and fails all active Coordinator futures / stream queues with a non-empty
   error.
-- Keep default configs on local backend.
-
-Phase 1:
-
 - Validate local vs SGLang parity at `tp_size=1`.
 - Validate SGLang `tp_size=1` vs `tp_size=2`.
 - Validate long-video Qwen3-Omni speech path without the current thinker OOM /
   encoder memory reserve workaround.
+- Keep default configs on local backend until parity and fault handling pass;
+  selected Qwen3-Omni configs may then opt into explicit `backend="auto"`.
 
-Phase 2:
+Follow-up work:
 
-- Switch selected Qwen3-Omni configs to explicit `backend="auto"` once parity
-  and fault handling pass.
-
-Phase 3:
-
+- Derive Omni stage-budget defaults with a placement-aware startup heuristic.
+- Explore profile / benchmark / OOM-feedback auto tuning.
 - Delete duplicated local encoder implementations after one release with
   SGLang-backed encoders as the default for supported models.
 
@@ -657,15 +721,22 @@ Minimum validation should cover:
   image/audio activation-budget admission (target the
   `runtime.resources.encoder_activation_budget_bytes` injection path
   and `reject_untyped_encoder_activation_budget_bytes`).
+- Unit: launch-mode map is computed before topology and reused by
+  topology validation, `_build_stage_groups`, SGLang env remap, and
+  TP-launch-kwarg preflight.
 - Unit: co-located encoder + thinker memory accounting under PR #430's
   process-scoped path — assert the AR runner's `gpu_mem_accounting`
   log records the `nvml_process` or `stage_load_fallback` branch and
   the available-for-KV value matches
-  `total_memory * total_gpu_memory_fraction - process_used`. There is
-  no planner-side `apply_encoder_mem_reserve` step to validate on
-  current main; the
-  [Memory And Co-Location Contract](#memory-and-co-location-contract)
-  above is the source of truth.
+  `total_memory * total_gpu_memory_fraction - process_used`.
+- Unit: dynamic headroom validation rejects resident budgets plus
+  encoder / AR / code2wav / safety dynamic reserves that exceed the
+  per-GPU placement limit.
+- Unit: typed `runtime.resources.total_gpu_memory_fraction` configs
+  reject nonzero legacy `encoder_mem_reserve`; the Encoder TP path does
+  not call planner-side `apply_encoder_mem_reserve`; the Qwen thinker
+  factory default is `0.0` or otherwise ignored unless the user
+  explicitly configures the legacy reserve.
 - Unit: TP metadata/tensor fan-out does not pickle tensor payload bytes and does
   not issue device broadcasts after allocation failure.
 - Unit: pre-forward failures emit request-level errors; forward-time TP faults
@@ -678,14 +749,14 @@ Minimum validation should cover:
 ## Open Questions
 
 1. What should the upstream partial encoder-submodule loader API look like
-   after Phase 1 validates the local SGLang-Omni compatibility shim?
+   after the local SGLang-Omni compatibility shim is validated?
 2. When upstream Qwen3-Omni encoder DP is complete, do we expose DP as a second
    parallelism axis or keep this RFC TP-only and add a separate DP design?
 
 ## Progress Tracking
 
-- [ ] Phase 0: land runner, scheduler, adapters, memory aggregation, launcher
-      validation.
-- [ ] Phase 1: local vs SGLang and tp1 vs tp2 parity.
-- [ ] Phase 2: opt selected Qwen3-Omni configs into `backend="auto"`.
-- [ ] Phase 3: remove duplicated local encoder code after one release.
+- [ ] Encoder TP PR: runner, scheduler, adapters, cost admission, launch-mode
+      map, memory validation, fatal-path plumbing, and parity validation.
+- [ ] Follow-up: placement-aware Omni startup heuristic for stage budgets.
+- [ ] Follow-up: profile / benchmark / OOM-feedback auto tuning.
+- [ ] Follow-up: remove duplicated local encoder code after one release.

@@ -29,18 +29,20 @@ updated before implementation.
 >   field discussed below is **not** introduced. `StageConfig.runtime: StageRuntimeConfig`
 >   already exists from PR #430 (`sglang_omni/config/schema.py:160`), with
 >   nested `resources: StageResourceConfig` carrying `total_gpu_memory_fraction`.
->   Phase 0 adds **one new field** —
+>   The Encoder TP PR adds **one new field** —
 >   `StageResourceConfig.encoder_activation_budget_bytes` — for
 >   `EncoderScheduler.max_batch_cost`. No new top-level `memory`
 >   field, no `weight_budget_bytes`, no `relay_budget_bytes`.
 > - **Memory accounting.** PR #430's
 >   `SGLModelRunner._profile_available_bytes` already handles colocated
 >   memory by reading process-scoped NVML (or stage-load delta as
->   fallback) at runtime. The
+>   fallback) at runtime for AR KV sizing. The
 >   "planned_available_bytes_after_encoder_load" / per-GPU readiness
 >   barrier / planner-side `mem_fraction_static` reserve logic written
->   in earlier revisions of this document is **obsolete** —
->   measurement at load time supersedes pre-computed planning. See
+>   in earlier revisions of this document is **obsolete**. The current
+>   contract is explicit resident/static budgets plus GPU-level dynamic
+>   reserve validation; the Encoder TP PR does not infer those budgets
+>   with a heuristic or auto tune. See
 >   [Memory accounting reuses PR #430](#memory-accounting-reuses-pr-430)
 >   below for the current contract.
 > - **Stage process / `single_visible_device`.** Main's
@@ -48,7 +50,7 @@ updated before implementation.
 >   allows multiple stages to share an OS process, with the invariant
 >   that any `tp_size > 1` stage must own its process exclusively
 >   (`sglang_omni/pipeline/stage_group.py:23-40`).
->   Phase 0 widens `get_stage_process_env`'s single-device remap to
+>   The Encoder TP PR widens `get_stage_process_env`'s single-device remap to
 >   every SGLang-backed encoder stage, including
 >   `tp_size=1 + backend in {"sglang", "auto"}`. The child sees only
 >   its assigned physical GPU, `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS`
@@ -60,7 +62,7 @@ updated before implementation.
 > - **Resolver.** `_resolve_factory_args` is renamed
 >   `resolve_stage_factory_args` (`sglang_omni/config/runtime.py:15`)
 >   and already injects `total_gpu_memory_fraction` based on factory
->   signature inspection. Phase 0 extends it with the same shape for
+>   signature inspection. The Encoder TP PR extends it with the same shape for
 >   `encoder_activation_budget_bytes`.
 >
 > The rest of this document (TP fan-out contract, scheduler error
@@ -365,7 +367,7 @@ does the metadata/tensor extraction we need):
    `restore_tensors(metadata, tensor_dict)` to rebuild the payload `data`
    and reconstitute the `IncomingMessage` list.
 
-### Tensor placement contract (Phase 0)
+### Tensor placement contract (Encoder TP PR)
 
 The default v1 relay backend is `shm`, and `_resolve_relay_config` in
 `pipeline/mp_runner.py:228-240` deliberately does **not** inject `gpu_id`
@@ -1034,7 +1036,7 @@ non-upstreamed encoders.
 ## Weight Loading Scope
 
 This is a load-bearing decision and a first-class H2 (not an Open Question)
-because it determines whether Phase 0 can fit on H200-class hardware at all.
+because it determines whether Encoder TP can fit on H200-class hardware at all.
 
 Encoder stages must **not** load the full upstream `ForConditionalGeneration`
 model. For Qwen3-Omni, `Qwen3OmniMoeForConditionalGeneration.__init__`
@@ -1043,7 +1045,7 @@ modules. Loading that on every encoder GPU duplicates the same ~57 GB of
 thinker weights the thinker stage already owns — clearing the memory win that
 encoder TP is meant to deliver.
 
-Phase 0 path:
+Encoder TP path:
 
 1. Each adapter declares the encoder submodules it needs via
    `EncoderModuleSpec` (one spec per submodule, with checkpoint prefixes and
@@ -1072,10 +1074,10 @@ Concrete sizing for Qwen3-Omni:
 The 24× weight reduction is what makes co-located encoder + thinker viable
 on a single GPU at all.
 
-Phase 0 ships a local `EncoderModuleContainer` + partial loader inside
+The Encoder TP PR ships a local `EncoderModuleContainer` + partial loader inside
 SGLang-Omni. The upstream `get_model()` API does not expose a partial-load
 entry point today; calling it for an encoder stage would instantiate the
-entire `ForConditionalGeneration` class. After Phase 1 parity is locked, we
+entire `ForConditionalGeneration` class. After parity is locked, we
 should propose an upstream helper (`sglang.srt.disaggregation.EncoderModelRunner`
 or `EncoderModelLoader`) so future models reuse the same submodule-loading
 contract from SGLang main. Until then, the local container is the
@@ -1119,7 +1121,7 @@ calls, not the surrounding ZMQ/cache/transfer-engine machinery):
 
 ### Upstream compatibility contract
 
-Phase 0 uses a local `SGLangEncoderRunner` shim, but the shim has a bounded
+The Encoder TP PR uses a local `SGLangEncoderRunner` shim, but the shim has a bounded
 upstream dependency surface. "Reuse SGLang" does **not** mean copying
 `MMEncoder.__init__` as an implicit public API.
 
@@ -1148,14 +1150,14 @@ Minimal signature contract:
 
 Compatibility policy:
 
-- Phase 0 compatibility is pinned to the SGLang commit/version exercised in CI.
+- Encoder TP compatibility is pinned to the SGLang commit/version exercised in CI.
   Tracking SGLang main is acceptable only if CI imports the allowlisted surface
   and runs the smoke tests below.
 - If a new upstream dependency is needed, either wrap it behind the local
   compatibility shim or upstream a helper before depending on it directly.
 - The desired upstream follow-up is an `EncoderModelRunner` / partial encoder
   loader helper that shrinks this shim. That is a refactoring target after
-  Phase 1 parity, not an undefined Phase 0 dependency.
+  parity, not an undefined Encoder TP dependency.
 
 Smoke tests should fail early when an upstream change breaks the contract:
 
@@ -1228,8 +1230,8 @@ definitions remain upstream SGLang code.
 > `cuda:0`, and SGLang receives `dist_local_rank=tp_rank` (`0` at
 > `tp_size=1`). What is obsolete is only the earlier implementation
 > mechanism: adding a `single_visible_device` field and setting it from
-> `_resolve_factory_args`. The Phase 0 launcher derives the remap from
-> the resolved `backend in {"sglang", "auto"}` plus the
+> `_resolve_factory_args`. The Encoder TP launcher derives the remap from
+> the launch-mode `backend in {"sglang", "auto"}` plus the
 > process-exclusivity rule described in
 > [Launch path reconciliation with main](#launch-path-reconciliation-with-main).
 
@@ -1278,9 +1280,9 @@ local-master / shard-index slot, which is undefined for
 
 > **OBSOLETE IMPLEMENTATION MECHANISM (2026-05-17).** The
 > `single_visible_device: bool = False` field and the
-> `_resolve_factory_args` change that injects it are not the Phase 0
-> implementation path. The Phase 0 launcher derives both process
-> exclusivity and the single-device remap from the resolved
+> `_resolve_factory_args` change that injects it are not the Encoder TP
+> implementation path. The Encoder TP launcher derives both process
+> exclusivity and the single-device remap from the launch-mode
 > `backend in {"sglang", "auto"}`. The corrected launch contract is in
 > [Launch path reconciliation with main](#launch-path-reconciliation-with-main)
 > at the end of this file. The pseudocode below stays for
@@ -1288,7 +1290,7 @@ local-master / shard-index slot, which is undefined for
 >
 > Specifically obsolete: every mention of `single_visible_device`,
 > the `_resolve_factory_args` change that injects it, and the
-> "Required launcher sub-step" list in the Phase 0 Implementation
+> "Required launcher sub-step" list in the Implementation
 > Plan that references it.
 
 `backend="sglang"` stages — including `tp_size=1` — must reach the
@@ -1406,9 +1408,14 @@ The Phase-0 PR therefore extends the launcher path:
    for stage_cfg in pipeline_config.stages:
        factory = import_string(stage_cfg.factory)
        params = inspect.signature(factory).parameters
-       resolved = _resolve_factory_args(stage_cfg, pipeline_config)
-       backend = resolved.get("backend", "local")
-       needs_tp_launch_params = stage_cfg.tp_size > 1 or backend == "sglang"
+       launch_mode = stage_launch_modes[stage_cfg.name]
+       requested_backend = launch_mode.requested_backend
+       resolved_backend = launch_mode.resolved_execution_backend
+       needs_tp_launch_params = (
+           stage_cfg.tp_size > 1
+           or requested_backend in {"sglang", "auto"}
+           or resolved_backend == "sglang"
+       )
        if not needs_tp_launch_params:
            continue
 
@@ -1419,7 +1426,7 @@ The Phase-0 PR therefore extends the launcher path:
        if missing:
            raise ValueError(
                f"Stage {stage_cfg.name!r}: tp_size={stage_cfg.tp_size}, "
-               f"backend={backend!r} "
+               f"backend={requested_backend!r} "
                f"but factory {stage_cfg.factory!r} does not accept TP "
                f"launch parameters {sorted(missing)}. This factory is "
                f"not compatible with the SGLang/TP launch path; use a "
@@ -1427,12 +1434,14 @@ The Phase-0 PR therefore extends the launcher path:
            )
 
        # Layer 2: if the factory is a backend-aware encoder factory,
-       # only backend="sglang" implements actual TP.
+       # only resolved backend="sglang" implements actual TP.
        if stage_cfg.tp_size > 1 and "backend" in params:
-           if backend != "sglang":
+           if resolved_backend != "sglang":
                raise ValueError(
                    f"Stage {stage_cfg.name!r}: tp_size={stage_cfg.tp_size} "
-                   f"requires backend='sglang' (got {backend!r}). "
+                   f"requires resolved backend='sglang' "
+                   f"(requested={requested_backend!r}, "
+                   f"resolved={resolved_backend!r}). "
                    f"The local encoder path does not implement TP and "
                    f"would silently spawn TP-rank processes that each "
                    f"run a full local forward, with all but rank 0 "
@@ -1454,11 +1463,11 @@ The Phase-0 PR therefore extends the launcher path:
      factory uses `**kwargs` — at Stage follower IO time when the stage
      can't actually fan out batches. Layer 1 fails loud in the main
      process before any spawn.
-   - **Layer 2** catches "factory has a backend knob but the user
-     left it on local". Encoder factories accept `backend` *and*
+   - **Layer 2** catches "factory has a backend knob but the resolved
+     execution backend is local". Encoder factories accept `backend` *and*
      `tp_rank/tp_size/nccl_port`, so Layer 1 alone would pass them
      through; Layer 2 enforces that TP only happens when the user
-     explicitly opts into the SGLang backend.
+     explicitly opts into the SGLang backend or `auto` resolves to it.
 
    Concrete pass / fail matrix:
 
@@ -1467,25 +1476,31 @@ The Phase-0 PR therefore extends the launcher path:
    | thinker / talker (TP params, no `backend`) | 2 | n/a | passes |
    | image_encoder (TP params + `backend`)      | 1 | "sglang" | passes; parent still injects `nccl_port` |
    | image_encoder (TP params + `backend`)      | 2 | "sglang" | passes |
-   | image_encoder (TP params + `backend`)      | 2 | "local" / "auto" / unset | rejects (Layer 2) |
+   | image_encoder (TP params + `backend`)      | 2 | "local" / unset | rejects (Layer 2) |
+   | image_encoder (TP params + `backend`)      | 2 | "auto" | passes if resolved execution backend is "sglang"; rejects if "local" |
    | aggregate / preprocessing (no TP params)    | 2 | n/a | rejects (Layer 1) |
    | local-only factory                           | 1 | local / unset | passes |
 
 #### Backend resolution contract
 
-All launcher-side checks above (`single_visible_device` flag in
-`mp_runner`, `needs_mp` in `serve/launcher`, `compile_pipeline`
-reject) read the stage's backend through one and only one source:
+All launcher-side checks read the stage's backend through one source:
+the stage launch-mode map built by `prepare_pipeline_runtime` before
+process topology. The map is derived from `StageConfig.factory_args`
+plus typed runtime overrides:
 
 ```python
-_resolve_factory_args(stage_cfg, config).get("backend", "local")
+stage_launch_modes[stage_cfg.name].backend
 ```
 
-`_resolve_factory_args` (`config/compiler.py:138-158`) merges
-`stage_cfg.factory_args` with `config.runtime_overrides[stage.name]`
-and only injects `model_path` / `gpu_id` from the factory signature.
-**It deliberately does not introspect any other factory signature
-defaults.** The implication is load-bearing:
+For `backend="auto"`, the map records both the requested backend
+(`"auto"`) and the resolved execution backend (`"sglang"` or
+`"local"`). Topology and env-remap rules use the requested/launch-mode
+backend to allocate the SGLang-capable process shape early; Layer 2 TP
+preflight uses the resolved execution backend to decide whether TP is
+actually legal.
+
+The launcher deliberately does **not** introspect factory signature
+defaults. The implication is load-bearing:
 
 - The factory function's `backend` signature default is irrelevant to
   the launcher decision.
@@ -1497,6 +1512,11 @@ defaults.** The implication is load-bearing:
 - Tests for any of the launcher checks should provide a StageConfig
   with explicit `factory_args["backend"]` set, never lean on signature
   defaults.
+- If `backend="auto"` can resolve to SGLang for an adapter, the
+  launch-mode map must still mark the stage as SGLang-capable so
+  process exclusivity, env remap, and `nccl_port` allocation happen
+  before the child starts. For `tp_size > 1`, `auto` passes only when
+  the resolved execution backend is SGLang; `auto -> local` rejects.
 
 After this change, `SGLangEncoderRunner` sees `cuda:0` in both lanes
 and the runner's GPU placement collapses to one rule:
@@ -1509,7 +1529,7 @@ dist_local_rank = tp_rank        # 0 in tp_size=1 lane, [0, tp_size) in tp>1
 `base_gpu_id`, `set_device`, `DeviceConfig.gpu_id`, `self.device`, and
 `local_rank` all use these two values directly.
 
-Phase 1 parity testing must:
+Parity testing must:
 
 - exercise a non-zero `gpu` at `tp_size=1` (e.g. `gpu=4`) and assert
   three things at once: the child's
@@ -1724,7 +1744,7 @@ is shaped for AR engines: it requires a positional `context_length` and
 defaults `mem_fraction_static=0.7`, `max_running_requests=16`,
 `max_prefill_tokens=16384`. None of those have a clean meaning for
 encoder-only stages (no KV pool, no AR running queue, no prefill token
-budget). Reusing the AR builder also fails at runtime because Phase 0's
+budget). Reusing the AR builder also fails at runtime because the encoder
 factory does not know a meaningful `context_length` for the encoder
 process.
 
@@ -1840,21 +1860,21 @@ The protected-key reject covers:
   `world_size`, `tp_rank`, `gpu_id`, `base_gpu_id`, `nccl_port`,
   `dist_init_addr` — pipeline runner decides these from
   `StageConfig.tp_size` / `gpu` and the per-stage NCCL port allocator.
-  Phase 0 starts exactly `StageConfig.tp_size` local ranks; DP, EP,
+  Encoder TP starts exactly `StageConfig.tp_size` local ranks; DP, EP,
   attention-CP, and multinode shapes are out of scope and cannot be
   activated through `server_args_overrides`.
 - `encoder_only` / `language_only` — the runner no longer relies on the
   full upstream model factory for the encoder-vs-language split. Letting
   users flip these through overrides would make `ServerArgs` disagree with
   the module specs the runner actually loads.
-- `mm_enable_dp_encoder` — Phase 0–2 require encoder TP only; allowing
+- `mm_enable_dp_encoder` — this RFC requires encoder TP only; allowing
   this through `overrides` would silently violate the rejection rule
   the factory layer also enforces.
 - `enable_dp_attention`, `enable_dp_attention_local_control_broadcast`,
   `enable_dp_lm_head` — these change SGLang's data-parallel collective
   layout while the v1 launcher still only constructs the TP group
   described in this RFC.
-- `disable_cuda_graph` — Phase 0 requires variable shapes; piecewise
+- `disable_cuda_graph` — Encoder TP requires variable shapes; piecewise
   CUDA graph for encoder ViT lands later (PR #15320 / #16785 area).
 - `device` — `SGLangEncoderRunner` hardcodes `DeviceConfig(device="cuda", ...)`
   and `get_default_distributed_backend("cuda")`. Letting `overrides`
@@ -1924,7 +1944,7 @@ Why all six, not just `load_format` + `download_dir`:
   participate too; passing the fields keeps that path open.
 
 `build_sglang_encoder_server_args` therefore accepts these values via its
-`**overrides`. Phase 0 default behavior matches a local checkpoint load —
+`**overrides`. Default behavior matches a local checkpoint load —
 the four extra fields default to `None`/empty in `ServerArgs`, so users
 who don't use these features pay nothing. Users who do can add them
 through `factory_args` and they reach `LoadConfig` unchanged.
@@ -1986,9 +2006,9 @@ that:
   and slices the raw embedding for active requests.
 
 Cache (`cache_key`) is intentionally **not** wired into the SGLang path in
-Phase 0: a TP-aware cache requires the entry rank to broadcast the
+the Encoder TP PR: a TP-aware cache requires the entry rank to broadcast the
 hit/miss decision before forward, otherwise rank A hitting and rank B
-missing would corrupt the collective. Cache becomes a Phase 2+ follow-up
+missing would corrupt the collective. Cache becomes a follow-up
 once the adapter is stable; until then SGLang path passes through every
 non-skip request to forward, and the existing local path keeps its cache.
 
@@ -2159,7 +2179,7 @@ private helpers in `stages.py`.
 > `Qwen3VLMoeForConditionalGeneration` exposes them as two methods
 > (`qwen3_vl.py:1193, 1212`), and PR #14907 (chunked vit attention) hooks
 > into them at this granularity. Fusing them would silently break that
-> hook. Phase 0 mirrors those method bodies around the loaded
+> hook. The Encoder TP adapter mirrors those method bodies around the loaded
 > `Qwen3OmniMoeVisionEncoder` submodule; an upstream helper can remove
 > that small wrapper later.
 
@@ -2311,51 +2331,47 @@ the encoder implementation changes underneath.
 
 ## Pipeline Config
 
-MVP keeps the public pipeline topology unchanged, but Phase 0 adds a minimal
-`StageMemoryConfig` so co-located placement has a launch-time budget owner.
-Encoder TP is expressed in `StageConfig`; memory is declared next to the stage
-instead of hidden in SGLang child-process defaults:
+Encoder TP keeps the public pipeline topology unchanged. TP is expressed in
+`StageConfig`; memory is declared through typed
+`runtime.resources` fields instead of hidden in SGLang child-process defaults:
 
 ```python
 StageConfig(
     name="image_encoder",
-    factory="sglang_omni_v1.models.qwen3_omni.stages.create_image_encoder_executor",
+    factory="sglang_omni.models.qwen3_omni.stages.create_image_encoder_executor",
     factory_args={
         "backend": "sglang",
         "max_batch_size": 32,
         "max_batch_wait_ms": 50,
     },
-    memory=StageMemoryConfig(
-        weight_budget_bytes=3 * 1024**3,
-        activation_budget_bytes=20 * 1024**3,
-        relay_budget_bytes=2 * 1024**3,
+    runtime=StageRuntimeConfig(
+        resources=StageResourceConfig(
+            total_gpu_memory_fraction=0.20,
+            encoder_activation_budget_bytes=20 * 1024**3,
+        ),
     ),
     gpu=[0, 1],
     tp_size=2,
     next="mm_aggregate",
     project_payload={
         "mm_aggregate": (
-            "sglang_omni_v1.models.qwen3_omni.request_builders."
+            "sglang_omni.models.qwen3_omni.request_builders."
             "project_encoder_to_mm_aggregate"
         )
     },
 )
 ```
 
-> **OBSOLETE (2026-05-17).** The pipeline-config example above uses the
-> retracted top-level `memory=StageMemoryConfig(...)` field with the
-> short kwarg names `activation_budget_bytes` / `weight_budget_bytes`
-> / `relay_budget_bytes`. Phase 0 instead reuses PR #430's
-> `StageConfig.runtime.resources` with one new field
-> `encoder_activation_budget_bytes`. The current example shape is at
-> [New field on `StageResourceConfig`](#new-field-on-stageresourceconfig);
-> the injection rules are at
-> [Injection contract for `encoder_activation_budget_bytes`](#injection-contract-for-encoder_activation_budget_bytes).
-> The four paragraphs below describe the **superseded** design and
-> stay only for history. **Do not implement.** In particular, the
-> factory kwarg name is `encoder_activation_budget_bytes` (long form),
-> not `activation_budget_bytes` — the resolver matches the field name
-> exactly on signature.
+> **OBSOLETE DESIGN HISTORY.** Earlier drafts used a retracted top-level
+> `memory=StageMemoryConfig(...)` field with the short kwarg names
+> `activation_budget_bytes` / `weight_budget_bytes` /
+> `relay_budget_bytes`. The current contract reuses PR #430's
+> `StageConfig.runtime.resources` with
+> `encoder_activation_budget_bytes`. The paragraphs below describe that
+> superseded design and stay only for history. **Do not implement.** In
+> particular, the factory kwarg name is `encoder_activation_budget_bytes`
+> (long form), not `activation_budget_bytes` — the resolver matches the
+> field name exactly on signature.
 
 `StageMemoryConfig.activation_budget_bytes` is fed into encoder admission as
 `max_batch_cost`. `StageMemoryConfig.weight_budget_bytes` and
@@ -2373,7 +2389,7 @@ passes the merged dict to the factory verbatim
 (`mp_runner.py:_build_stage_groups` line 72). It does **not** read
 `StageConfig.memory`.
 
-Phase 0 extends `_resolve_factory_args` for backend-aware encoder
+The earlier draft extended `_resolve_factory_args` for backend-aware encoder
 factories with two rules:
 
 1. **Injection**: after merging `factory_args` + `runtime_overrides`, if
@@ -2391,7 +2407,7 @@ planner's per-GPU aggregation and the scheduler's per-iteration admission
 read from the same `StageMemoryConfig` field.
 
 The same rule applies to `weight_budget_bytes` and `relay_budget_bytes`:
-they are not factory kwargs in Phase 0, so the conflict-reject only needs
+they were not factory kwargs in that draft, so the conflict-reject only needs
 to fire on `activation_budget_bytes`. If any future factory kwarg
 duplicates a `StageMemoryConfig` field, this rule should be extended in
 lockstep.
@@ -2564,7 +2580,7 @@ The arithmetic and scaling constants are identical to the local helper
 
 ### Audio admission model
 
-The audio adapter provides a real Phase 0 admission model. Unlike image/video,
+The audio adapter provides a real Encoder TP admission model. Unlike image/video,
 audio cost is not strictly additive because batching pads `input_features` and
 `feature_attention_mask` to the maximum time dimension in the selected batch.
 Therefore audio should use `batch_cost_fn(payloads)` for batch formation and
@@ -2611,12 +2627,12 @@ adapter `__init__` time. `_get_feat_extract_output_lengths` is upstream's
 formula and is a constant-arithmetic function of the input length, so calling
 it per request is O(1).
 
-**Phase 0 multiplier default**: `QWEN3_AUDIO_ENCODER_ACTIVATION_MULTIPLIER = 5`
+**Encoder TP multiplier default**: `QWEN3_AUDIO_ENCODER_ACTIVATION_MULTIPLIER = 5`
 — the same conservative value used by `QWEN3_IMAGE_ENCODER_ACTIVATION_MULTIPLIER`
 (`models/qwen3_omni/pipeline/visual_budget.py`), which v1 already calibrated for
 visual encoder activations. Audio's transformer stack is structurally similar
-(LayerNorm + MHA + MLP per layer), so 5× is a defensible starting point. Phase
-1 should profile real long-audio batches on H200 and adjust the constant if
+(LayerNorm + MHA + MLP per layer), so 5× is a defensible starting point. Follow-up
+profiling should measure real long-audio batches on H200 and adjust the constant if
 warranted; until then the multiplier is intentionally over-provisioned to
 prevent OOM rather than tuned for throughput.
 
@@ -2702,17 +2718,23 @@ Internal TP traffic is owned by SGLang:
 > **OBSOLETE (2026-05-17).** The "StageMemoryConfig + per-physical-GPU
 > planner aggregation + planned-available-bytes + readiness barrier"
 > design described in this section and its `### Schema location` /
-> `### Relation to PR #430` subsections is **not** implemented in
-> Phase 0. The current contract is:
+> `### Relation to PR #430` subsections is **not** implemented. The
+> current contract is:
 >
 > - One new field: `StageConfig.runtime.resources.encoder_activation_budget_bytes`
->   (admission-only, fed into `EncoderScheduler.max_batch_cost`).
+>   (encoder admission guard and dynamic reserve input, fed into
+>   `EncoderScheduler.max_batch_cost`).
+> - Existing field:
+>   `StageConfig.runtime.resources.total_gpu_memory_fraction`
+>   (per-rank/process resident/static placement budget).
 > - Co-located encoder + thinker memory accounting reuses PR #430's
 >   runtime path in `SGLModelRunner._profile_available_bytes`
 >   (`sglang_omni/model_runner/sglang_model_runner.py:99-217`), which
 >   measures `total_memory * total_gpu_memory_fraction - process_used`
->   at thinker load time. No planner-side aggregation, no readiness
->   barrier, no `planned_available_bytes_after_encoder_load` formula.
+>   at thinker load time for AR KV sizing.
+> - Pre-spawn validation sums resident budgets and resolved dynamic
+>   reserves per GPU. No readiness barrier and no
+>   `planned_available_bytes_after_encoder_load` formula.
 >
 > The current normative sections are
 > [Memory accounting reuses PR #430](#memory-accounting-reuses-pr-430),
@@ -2763,7 +2785,7 @@ planner and scheduler consume.
 
 ### Schema location: where `StageMemoryConfig` lives
 
-Phase 0 adds `memory` as a **top-level optional field on `StageConfig`**:
+The earlier draft added `memory` as a **top-level optional field on `StageConfig`**:
 
 ```python
 # sglang_omni_v1/config/schema.py
@@ -2787,13 +2809,13 @@ This is **not** nested under `runtime.resources`. The current
 field; there is no `sglang_omni_v1/config/runtime.py` module, and there is
 no `StageResourceConfig` class anywhere in v1 today. PR #430 implemented
 colocation memory plumbing inside the SGLang backend adapter, not on
-`StageConfig`. Phase 0 therefore adds `memory` directly on `StageConfig`
+`StageConfig`. That draft therefore added `memory` directly on `StageConfig`
 rather than predicting a nested namespace that does not exist yet.
 
-If a future RFC (e.g. the Phase 4 typed-runtime-override primitive)
+If a future RFC (e.g. a typed-runtime-override primitive)
 introduces `StageConfig.runtime: StageRuntimeConfig` and moves `memory`
 under it, the migration is non-breaking: `StageConfig.memory` becomes a
-deprecated alias for `runtime.resources.memory` for one release. Phase 0
+deprecated alias for `runtime.resources.memory` for one release. The earlier draft
 must not pre-commit to that nesting.
 
 ### Relation to PR #430 colocation memory work
@@ -2809,7 +2831,7 @@ memory accounting **inside the SGLang backend adapter**, not on
   invokes the reserve **only when the user has not pinned**
   `mem_fraction_static`. If the user pins it, the reserve is skipped.
 
-Phase 0 encoder TP adds the **planner-side input** — `StageConfig.memory` —
+The earlier draft added the **planner-side input** — `StageConfig.memory` —
 that this bridge currently lacks. Without it, the bridge has no canonical
 source for the encoder reserve and has to guess from auto-allocation
 behaviour.
@@ -2848,13 +2870,13 @@ after, the order flips and the formula yields a different reserve. A
 validator that compares against `total_gpu_bytes` will pass cases that
 SGLang's own KV sizing will reject after spawn.
 
-##### Phase 0 load-order assumption
+##### Obsolete load-order assumption
 
 `MultiProcessPipelineRunner._build_stage_groups` (`pipeline/mp_runner.py:300-304`)
 spawns every group with `group.spawn(ctx)` before any `wait_ready`. There is
 no enforced load-order between co-located encoder and thinker today.
 
-Phase 0 fixes this by requiring the planner to serialize co-located AR
+The earlier draft fixed this by requiring the planner to serialize co-located AR
 stage loads behind co-located encoder loads on the same physical GPU:
 
 - Within a single physical GPU, all encoder ranks must reach `ready` before
@@ -2871,7 +2893,7 @@ declared topology: it equals
 `total_gpu_bytes - sum_co_located_encoder_resident_bytes` at thinker load
 time.
 
-##### Phase 0 reserve rules
+##### Obsolete reserve rules
 
 With the load order pinned, the planner-side rules are:
 
@@ -2995,7 +3017,7 @@ Rules:
   Current `StageGroup.any_dead()` only reports a non-zero child exit
   (`pipeline/stage_group.py:130-132`), and `MultiProcessPipelineRunner`
   currently responds by calling `stop()` (`pipeline/mp_runner.py:332-342`).
-  Phase 0 must make that path fail all active Coordinator futures /
+  The Encoder TP PR must make that path fail all active Coordinator futures /
   stream queues with a non-empty error before shutdown, otherwise
   outstanding HTTP requests can hang after the TP group is killed.
 - No adapter may return a fake-success embedding (zero tensor, empty list,
@@ -3061,7 +3083,7 @@ then just sets `backend="sglang"` and `tp_size`.
 5. Validate parity: `backend="local"` vs `backend="sglang", tp_size=1` on
    the same input. Then bump `tp_size`.
 
-After Phase 0, everything else (`Stage`, `StageGroup`, `Coordinator`,
+After the Encoder TP PR, everything else (`Stage`, `StageGroup`, `Coordinator`,
 `relay`, `EncoderScheduler` itself) is reused by new models without
 model-specific modification. `MultiProcessPipelineRunner`, Coordinator
 failure plumbing, and `pipeline/stage_process.py` get the small launcher /
@@ -3071,16 +3093,26 @@ addition that all sglang-backed encoder stages share.
 
 ## Implementation Plan
 
-Phase 0 — landing path that doesn't break v1:
+Encoder TP PR implementation scope:
 
 1. **Launcher extension** (`sglang_omni/pipeline/` + `sglang_omni/serve/` + `sglang_omni/config/`).
    This list reflects the post-merge main state — do **not** use the
    older `single_visible_device` / `_resolve_factory_args` /
    `StageMemoryConfig` plan from the obsolete sections above.
+   - **Stage launch-mode map.** `prepare_pipeline_runtime` builds a
+     per-stage launch-mode map before process topology. The map is
+     computed from `StageConfig.factory_args` plus typed
+     `runtime_overrides`; factory defaults that affect launcher mode
+     are not accepted as the source of truth. The same map feeds
+     topology validation, `_build_stage_groups`, SGLang process
+     exclusivity, environment remap, TP preflight, and `nccl_port`
+     allocation. This avoids the old bug where topology tried to
+     reason about a backend value that was only resolved later during
+     factory construction.
    - **Process exclusivity for SGLang-backend stages.** In
      `_build_process_groups` (`sglang_omni/config/topology.py:65-80`),
      when grouping non-TP stages by `stage.process`, validate that
-     any `ProcessGroupPlacement` containing a stage with resolved
+     any `ProcessGroupPlacement` containing a stage with launch-mode
      `backend in {"sglang", "auto"}` has exactly one member. Raise
      `ValueError` otherwise — sharing with another SGLang-backed
      stage OR with a CPU sibling both crash on the second
@@ -3094,7 +3126,7 @@ Phase 0 — landing path that doesn't break v1:
      so the existing TP remap branch (which sets
      `CUDA_VISIBLE_DEVICES=<one>` and
      `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`) also fires when
-     resolved `backend in {"sglang", "auto"}`, regardless of
+     launch-mode `backend in {"sglang", "auto"}`, regardless of
      `tp_size`. Local-only `tp_size=1` stages still take the
      early-return `{}` path. This widening is safe because
      SGLang-backed stages own their OS process exclusively (the
@@ -3116,12 +3148,11 @@ Phase 0 — landing path that doesn't break v1:
      - **Layer 1** — any stage that **will receive** TP launch
        kwargs must have a factory whose signature accepts
        `tp_rank`, `tp_size`, and `nccl_port`. The set of such
-       stages is `tp_size > 1 OR resolved backend in {"sglang", "auto"}`
-       — both `"sglang"` (current) and `"auto"` (Phase 2 may
-       resolve it to SGLang) get the parent-allocated `nccl_port`
+       stages is `tp_size > 1 OR launch-mode backend in {"sglang", "auto"}`
+       — both `"sglang"` and `"auto"` get the parent-allocated `nccl_port`
        and `tp_rank=0, tp_size=1` injection in the singleton case,
        and the runner rejects `nccl_port=None`. Including `auto`
-       in the preflight prevents a Phase 2 `auto` encoder from
+       in the preflight prevents a future `auto` encoder from
        passing without TP kwargs in its signature and then crashing
        inside the SGLang branch with `nccl_port=None`.
      - **Layer 2 (backend-aware factories only)** — if the factory's
@@ -3148,10 +3179,19 @@ Phase 0 — landing path that doesn't break v1:
      (mirrors `reject_untyped_total_gpu_memory_fraction` at
      `runtime.py:58-72`): any value of this field in
      `factory_args` / `runtime_overrides` raises. There is no
-     planner-side `StageMemoryConfig` aggregation step — PR #430's
-     runtime memory plumbing handles colocation by measurement
-     instead of pre-spawn aggregation (see
+     planner-side `StageMemoryConfig`; placement and dynamic-reserve
+     validation use the typed `StageResourceConfig` fields, while PR
+     #430's runtime memory plumbing handles AR KV sizing by
+     process-scoped measurement (see
      [Memory accounting reuses PR #430](#memory-accounting-reuses-pr-430)).
+   - **GPU-level dynamic reserve validation.** Extend placement
+     validation so resident budgets plus resolved dynamic reserves fit
+     under `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`.
+     Dynamic reserves include encoder activation budgets, AR
+     activation / CUDA graph / workspace assumptions, code2wav
+     temporary peak assumptions, NCCL / allocator fragmentation, and
+     safety margin. This is validation only; the Encoder TP PR does
+     not infer those budgets with a startup heuristic or auto tune.
    - **`StageResourceConfig.model_post_init` extension.** Add a
      range check for `encoder_activation_budget_bytes` (positive int
      or None) next to the existing `total_gpu_memory_fraction`
@@ -3165,21 +3205,28 @@ Phase 0 — landing path that doesn't break v1:
      intentionally exits the process instead of attempting an unsafe
      post-forward CPU gather.
 
-   These Phase 0 launcher sub-steps are the load-bearing prerequisite
-   for Phase 1's `tp_size=1, gpu!=0` parity lane to validate the right
+   These launcher sub-steps are the load-bearing prerequisite for the
+   `tp_size=1, gpu!=0` parity lane to validate the right
    thing — see
    [Launch path reconciliation with main](#launch-path-reconciliation-with-main).
 
    **Per-sub-step unit tests** (so each launcher change can be verified
-   independently of the GPU lane in Phase 1). These tests target the
+   independently of the GPU lanes). These tests target the
    real call sites (`_build_stage_groups`, `build_process_topology_plan`,
    `resolve_stage_factory_args`) — there is no `compile_pipeline()`
    to assert against on current main.
 
-   - **`get_stage_process_env` remap branches on resolved backend**:
-     spec with `tp_size=1` and resolved `backend="local"` returns
+   - **launch-mode map is built before topology**: build configs with
+     `backend="local"`, `"sglang"`, and `"auto"` in `factory_args` /
+     runtime overrides, then assert `prepare_pipeline_runtime` passes
+     the same launch-mode decisions to topology validation and
+     `_build_stage_groups`. A backend value that exists only as a
+     Python factory default is treated as unavailable for launcher
+     decisions.
+   - **`get_stage_process_env` remap branches on launch-mode backend**:
+     spec with `tp_size=1` and launch-mode `backend="local"` returns
      `{}` (early return preserved). Spec with `tp_size=1` and
-     resolved `backend in {"sglang", "auto"}` returns the remap env
+     launch-mode `backend in {"sglang", "auto"}` returns the remap env
      dict with `CUDA_VISIBLE_DEVICES` set to the assigned GPU and
      `SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS=true`. Spec with
      `tp_size>1` returns the remap env dict as today regardless of
@@ -3201,12 +3248,14 @@ Phase 0 — landing path that doesn't break v1:
    - **TP preflight Layer 2 (encoder factory backend gate)**: build
      a config where `image_encoder` has `tp_size=2, gpu=[0, 1],
      factory_args={}` (no backend). Assert `_build_stage_groups`
-     raises `ValueError`. Repeat with `factory_args={"backend":
-     "auto"}` — also raises. With `factory_args={"backend":
-     "sglang"}` — succeeds.
+     raises `ValueError`. With `factory_args={"backend": "sglang"}`,
+     assert success. With `factory_args={"backend": "auto"}`, assert
+     both branches: if launch-mode auto-resolution returns SGLang, it
+     succeeds; if auto-resolution returns local, it raises the same
+     Layer 2 `ValueError` as explicit `backend="local"`.
    - **SGLang-backed process exclusivity (topology)**: build a
      config with two stages declaring the same `stage.process` value
-     where at least one has resolved `backend="sglang"`.
+     where at least one has launch-mode `backend="sglang"`.
      `build_process_topology_plan` raises `ValueError` naming the
      conflicting group. Variants: (a) two SGLang-backed stages
      sharing a process, (b) one SGLang stage + one CPU sibling
@@ -3323,7 +3372,8 @@ Phase 0 — landing path that doesn't break v1:
      GPU placement through `server_args_overrides` instead of
      `StageConfig.tp_size` / `StageConfig.gpu`.
 2. Add `sglang_omni/model_runner/sglang_encoder_runner.py`. Behind
-   `backend="sglang"` only — never the default in this PR. The runner
+   explicit `backend="sglang"` / `"auto"` only; the factory default
+   remains `"local"`. The runner
    builds `EncoderModuleContainer` from adapter-provided
    `EncoderModuleSpec`s and partial-loads matching checkpoint prefixes;
    it must not call `get_model()` on the full upstream
@@ -3334,7 +3384,7 @@ Phase 0 — landing path that doesn't break v1:
    audio), including the visual/audio `EncoderModuleSpec`s and tests that
    the image stage does not load `audio_tower`/LLM/talker weights and the
    audio stage does not load visual/LLM/talker weights. The audio adapter
-   includes the Phase 0 conservative `batch_cost_fn` and single-request guard;
+   includes the conservative `batch_cost_fn` and single-request guard;
    it does not use `request_cost_fn=0` / `max_batch_cost=None`.
 5. Extend the existing `create_image_encoder_executor()` and
    `create_audio_encoder_executor()`
@@ -3350,7 +3400,7 @@ Phase 0 — landing path that doesn't break v1:
    `runtime.resources.encoder_activation_budget_bytes` for image/audio
    encoder stages.
 
-Phase 1 — parity validation (gates Phase 2):
+Encoder TP PR validation gates:
 
 7. GPU parity test: `backend="local"` vs `backend="sglang", tp_size=1` on
    image encoder and audio encoder, in isolation, at a non-zero
@@ -3377,9 +3427,9 @@ Phase 1 — parity validation (gates Phase 2):
    thinker GPU, run with image+audio encoders sharded to separate GPUs,
    verify it completes.
 
-Phase 2 — switch new deployments to the SGLang backend:
+Backend rollout after validation:
 
-10. After Phase 1 passes, do **two** changes together:
+10. After parity and fault-handling validation pass, do **two** changes together:
     - Change `_resolve_backend("auto", ...)` to return `"sglang"` when
       the adapter exists.
     - Update the default Qwen3-Omni `PipelineConfig` template (and any
@@ -3399,32 +3449,33 @@ Phase 2 — switch new deployments to the SGLang backend:
     parent-allocated `nccl_port`, `encoder_activation_budget_bytes`
     injection).
 
-    The TP preflight and process-exclusivity checks added in Phase 0
-    already fire on resolved `backend in {"sglang", "auto"}`, so once
+    The TP preflight and process-exclusivity checks added above
+    already fire on launch-mode `backend in {"sglang", "auto"}`, so once
     the templates explicitly carry `backend="auto"` the rest works.
 
-    **Phase 2 unit test:** load the default Qwen3-Omni
+    **Config rollout unit test:** load the default Qwen3-Omni
     `PipelineConfig` (the one returned by the canonical builder /
     cookbook helper) and assert that the resolved
     `resolve_stage_factory_args(image_encoder_stage, config).get("backend")`
     is exactly `"auto"` — i.e. the value lives in `factory_args`, not
-    in the factory signature. This is the only test that proves Phase
-    2's flip actually crosses the launcher boundary.
+    in the factory signature. This is the test that proves the
+    backend flip actually crosses the launcher boundary.
 
-Phase 3 — clean up duplicated local encoder code:
+Follow-up cleanup:
 
-11. After at least one release with Phase 2 default, delete
+11. After at least one release with SGLang-backed encoders as the
+    supported/default path, delete
     `sglang_omni/models/qwen3_omni/components/{image_encoder.py,audio_encoder.py}`
     and the corresponding HF tower instantiation in `stages.py`.
 
-Phase 4 — runtime parameter plumbing (out of scope for the first PR):
+Follow-up runtime parameter plumbing:
 
 12. Continue extending `StageRuntimeConfig` / `StageResourceConfig`
     (`sglang_omni/config/schema.py:82-103`) — the typed
     stage-addressable override primitive PR #430 already introduced —
     with whatever runtime knobs subsequent encoder / co-location work
-    needs. Phase 0 only adds `encoder_activation_budget_bytes` to that
-    schema; later phases may add quantization config, batch-shape
+    needs. The Encoder TP PR adds `encoder_activation_budget_bytes` to that
+    schema; later work may add quantization config, batch-shape
     overrides, etc. through the same `resolve_stage_factory_args`
     injection shape. The retracted top-level `StageMemoryConfig` is
     **not** the migration source — `StageResourceConfig` is.
@@ -3459,6 +3510,10 @@ Minimum lanes (unit + GPU + E2E):
     `encoder_activation_budget_bytes` kwarg name; any value of that
     field in `factory_args` / `runtime_overrides` is rejected by
     `reject_untyped_encoder_activation_budget_bytes`.
+  - Launch-mode: `prepare_pipeline_runtime` computes the backend
+    launch-mode map before topology, and topology validation,
+    `_build_stage_groups`, SGLang process exclusivity, env remap, and
+    TP-launch-kwarg preflight all consume the same map.
   - Memory: co-located encoder + thinker on the same physical GPU
     runs unchanged through PR #430's process-scoped accounting
     (`SGLModelRunner._profile_available_bytes`). Validate by
@@ -3466,8 +3521,15 @@ Minimum lanes (unit + GPU + E2E):
     reports `gpu_mem_accounting=nvml_process` (or
     `stage_load_fallback`), and the available-for-KV value matches
     `total_memory * total_gpu_memory_fraction - process_used` within
-    a small tolerance. There is no planner-side `StageMemoryConfig`
-    aggregation step on current main.
+    a small tolerance.
+  - Dynamic reserve: resident budgets plus resolved encoder / AR /
+    code2wav / safety dynamic reserves are rejected when they exceed
+    `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`. Typed
+    `runtime.resources.total_gpu_memory_fraction` configs reject
+    nonzero legacy `encoder_mem_reserve`; the Encoder TP path does not
+    call planner-side `apply_encoder_mem_reserve`; the Qwen thinker
+    factory default is `0.0` or otherwise ignored unless the user
+    explicitly configures the legacy reserve.
 
 - **GPU**
   - Qwen3-Omni image encoder: `backend="local"` vs `backend="sglang",
@@ -3501,16 +3563,16 @@ Minimum lanes (unit + GPU + E2E):
 - **Reuse existing CI**
   - The existing thinker / talker CI (test_v1_qwen3_omni_*.py and the
     related test_v1_talker_*.py / test_v1_omni_scheduler.py files) must pass
-    unchanged in `backend="local"` mode in Phase 0 and `backend="sglang"`
-    mode in Phase 2.
+    unchanged in `backend="local"` mode and in the SGLang-backed encoder
+    validation lanes.
 
 ## Open Questions
 
 1. **Upstream `EncoderModelRunner` / partial encoder loader helper.**
-   The Phase 0 compatibility surface is defined in
+   The Encoder TP compatibility surface is defined in
    [Upstream compatibility contract](#upstream-compatibility-contract). The
    remaining open question is only the shape of the upstream helper we propose
-   after Phase 1: should SGLang expose the shared init + partial-load sequence
+   after parity validation: should SGLang expose the shared init + partial-load sequence
    (`set_global_server_args_for_scheduler` -> `ModelConfig` -> `LoadConfig`
    -> `init_distributed_environment` -> `initialize_model_parallel` ->
    `initialize_dp_attention` -> instantiate declared encoder submodules -> load
@@ -3518,7 +3580,7 @@ Minimum lanes (unit + GPU + E2E):
    That would delete most of the local `SGLangEncoderRunner` shim. The helper
    should **not** call `get_model()` on the full `ForConditionalGeneration`
    class; it should be a first-class encoder-submodule loader. Recommended:
-   land the local shim in Phase 0, then file an upstream issue after Phase 1
+   land the local shim in the Encoder TP PR, then file an upstream issue after parity
    passes and propose `sglang.srt.disaggregation.EncoderModelRunner`, driven by
    SGLang-Omni as the first consumer.
 
@@ -3532,10 +3594,10 @@ Minimum lanes (unit + GPU + E2E):
    Qwen2.5-VL (#13126 merged) and Qwen3-VL (#13724 merged) but Qwen3-Omni
    support is still open (#14886). PR #18721 also shows that DP encoder
    requires careful interaction with the LLM-side TP via
-   `VocabParallelEmbedding`. **MVP intentionally only supports encoder
+   `VocabParallelEmbedding`. **This RFC intentionally only supports encoder
    TP.** Encoder DP becomes a follow-up after #14886 lands upstream and
    we can import the audio side. The factory rejects
-   `mm_enable_dp_encoder=True` in Phase 0–2 to avoid coupling.
+   `mm_enable_dp_encoder=True` in the Encoder TP path to avoid coupling.
 
 3. **`StageConfig.tp_size` vs future `ParallelismConfig`.** Today TP is
    the only parallelism axis we expose. Encoder DP and possibly EP would
@@ -3544,7 +3606,7 @@ Minimum lanes (unit + GPU + E2E):
    when the second axis (DP) actually has a real consumer in v1.
 
 4. **Local fallback retention.** `models/qwen3_omni/components/image_encoder.py`
-   and `audio_encoder.py` should be deleted in Phase 3. Some reviewers
+   and `audio_encoder.py` should be deleted in a follow-up. Some reviewers
    will want to keep them as a debug fallback for one release. Default
    plan: delete after one release with `backend="auto" -> sglang"` as the
    default.
@@ -3555,18 +3617,18 @@ Minimum lanes (unit + GPU + E2E):
    lint rule that bans `except Exception` inside
    `models/<name>/components/` and `models/<name>/encoder_adapters.py`?
    That makes Rule 2 of the Scheduler-layer error handling enforceable.
-   Suggested: yes, as a follow-up PR after Phase 0.
+   Suggested: yes, as a follow-up PR after Encoder TP lands.
 
 6. **TP-aware encoder cache.** `EncoderRequestData.cache_key` is honored
    by the local path through `SimpleCacheManager`, but the SGLang path in
-   Phase 0 ignores cache and always forwards. Wiring cache into a
+   the Encoder TP PR ignores cache and always forwards. Wiring cache into a
    TP-broadcasting scheduler requires the entry rank to decide hit/miss
    *before* the broadcast and ship that decision so all ranks agree
    (otherwise the broadcast shape is wrong on a rank that thinks it hit
    while another missed). Suggested: design a small `CacheBroadcastPlan`
-   in Phase 2, after `tp_size>1` parity is locked.
+   in a follow-up after `tp_size>1` parity is locked.
 
-7. **Multinode encoder TP.** Phase 0 is single-node. `nnodes` and
+7. **Multinode encoder TP.** This RFC is single-node. `nnodes` and
    `node_rank` sit in `_ENCODER_PROTECTED_KEYS` so the SGLang runner
    can never accidentally enter a multinode init path; the launcher
    only allocates one NCCL port per stage and assumes
@@ -3581,9 +3643,35 @@ Minimum lanes (unit + GPU + E2E):
 ## Memory accounting reuses PR #430
 
 PR #430 (`sglang_omni/model_runner/sglang_model_runner.py:99-217`) already
-implemented colocated-AR KV-headroom profiling. The encoder Phase 0 path
-does not add a parallel planner-side reserve mechanism — it reuses the
-same machinery.
+implemented colocated-AR KV-headroom profiling. Encoder TP reuses that
+runtime path for AR KV sizing, but memory ownership is now expressed as
+two explicit layers:
+
+1. **Resident/static placement budgets** from
+   `runtime.resources.total_gpu_memory_fraction`.
+2. **GPU-level dynamic reserve validation** for activations, CUDA graph
+   buffers, workspace, code2wav temporary peaks, NCCL / allocator
+   fragmentation, and safety margin.
+
+The Encoder TP PR does not infer those budgets with SGLang-style startup
+heuristics or profile / benchmark auto tuning. It consumes typed values,
+validates them, and logs the resolved resident and dynamic budgets.
+
+The reason this is different from upstream SGLang is the ownership
+model. In upstream single-engine SGLang, `mem_fraction_static = y`
+means "model weights + KV cache pool", while `1 - y` is left for
+activations, CUDA graph buffers, workspace, and other same-GPU
+applications. The core upstream sizing formula is:
+
+```text
+rest_memory =
+    post_model_load_memory - pre_model_load_memory * (1 - mem_fraction_static)
+```
+
+That formula assumes one SGLang engine owns the GPU. Omni colocation
+can place thinker, talker_ar, image_encoder, audio_encoder, and
+code2wav on the same physical GPU, so `1 - mem_fraction_static` can no
+longer be treated as the AR stage's private dynamic reserve.
 
 Three runtime paths inside `SGLModelRunner._profile_available_bytes`:
 
@@ -3608,33 +3696,86 @@ Three runtime paths inside `SGLModelRunner._profile_available_bytes`:
 
 What this means for encoder colocation:
 
-- The encoder stage declares its own
-  `runtime.resources.total_gpu_memory_fraction`. The planner already
-  rejects pre-spawn when per-GPU sums exceed
+- Every GPU stage declares its own
+  `runtime.resources.total_gpu_memory_fraction`. This is the
+  per-rank/process resident/static placement budget. It accounts for
+  weights, KV cache, persistent buffers, GPU-resident encoder cache,
+  and vocoder steady state. It is not a peak memory cap.
+- After TP rank expansion, the planner sums resident budgets per
+  physical GPU and rejects pre-spawn when the per-GPU sum exceeds
   `PlacementConfig.max_total_gpu_memory_fraction_per_gpu`
-  (`sglang_omni/config/schema.py:111`). No new aggregation logic.
-- The encoder runner is, from PR #430's perspective, a colocated
-  process with a budget. It doesn't have a KV pool, but it has
-  weights + activations that consume `process_used`, which is
-  exactly what NVML reports. The AR profiler sees the encoder's
-  allocation through its own `total_memory - process_used` math.
-- User-pinned `mem_fraction_static` on the *thinker* stage continues
-  to skip `apply_encoder_mem_reserve` (unchanged from PR #430). The
-  encoder's `total_gpu_memory_fraction` does not interact with the
-  thinker's `mem_fraction_static` — they bound different things
-  (encoder process memory vs thinker KV pool fraction).
+  (`sglang_omni/config/schema.py:111`).
+- For AR stages, the colocated adapter mirrors
+  `total_gpu_memory_fraction` into SGLang `mem_fraction_static` for
+  compatibility, but PR #430 changes KV sizing to
+  `stage_budget = total_memory * total_gpu_memory_fraction` and
+  `available_for_kv = stage_budget - measured_ar_process_memory`.
+  These are not two multiplicative limits.
+- For non-AR encoder and code2wav stages,
+  `total_gpu_memory_fraction` is placement-side resident budgeting
+  only. It does not install a runtime allocator cap, and code2wav has
+  no `mem_fraction_static`.
+- `encoder_activation_budget_bytes` is the Encoder TP admission guard
+  for image / video / audio temporary activation peaks. It caps
+  encoder batch formation through `EncoderScheduler.max_batch_cost`
+  and participates in dynamic reserve validation. It is a bridge field
+  for this PR, not the long-term user-facing memory split API.
+
+Dynamic headroom is the remaining GPU-level shared resource:
+
+```text
+shared_dynamic_headroom_bytes =
+    physical_gpu_total_bytes * (
+        max_total_gpu_memory_fraction_per_gpu - resident_fraction_sum
+    )
+```
+
+Before launch, the placement planner validates:
+
+```text
+sum(stage_resident_budget_bytes_on_gpu)
++ sum(resolved_dynamic_reserve_bytes_on_gpu)
+<= physical_gpu_total_bytes * max_total_gpu_memory_fraction_per_gpu
+```
+
+Equivalently, `encoder_activation_budget_bytes` plus resolved AR,
+code2wav, and miscellaneous dynamic reserve assumptions must fit in
+the shared dynamic headroom. That is the guard missing from pure
+resident-budget aggregation: without it, a config could assign all GPU
+memory to resident stage budgets and leave no room for activations.
+
+For the Encoder TP PR, non-encoder dynamic reserves come from calibrated
+model-config assumptions or advanced typed overrides. Do not expose
+`thinker_activation_budget_bytes` / `talker_activation_budget_bytes` as
+ordinary user-facing primary knobs; long term, a placement-aware startup
+heuristic should derive them from model, topology, and runtime settings.
+Here, "calibrated assumptions" means compile-time hard-coded constants
+for a known `(model, hardware)` profile, not runtime inference; this is
+why they do not conflict with the non-goal of avoiding budget inference
+in the Encoder TP PR.
+
+`encoder_mem_reserve` is a pre-#430 bridge that subtracts an external
+encoder reserve from SGLang's auto-picked AR `mem_fraction_static`.
+It is not part of the Encoder TP contract. Configs using typed
+`runtime.resources.total_gpu_memory_fraction` must not also set a
+nonzero `encoder_mem_reserve`. The current Qwen thinker factory default
+`encoder_mem_reserve=0.05` must be removed or changed to `0.0` in the
+Encoder TP implementation. Legacy reserve behavior is allowed only when
+nonzero `encoder_mem_reserve` is explicitly configured on the legacy
+non-typed path; typed-budget configs must ignore the old default and
+reject any explicit nonzero value.
 
 The earlier revisions of this document proposed a
 `planned_available_bytes_after_encoder_load` formula and a per-GPU
 readiness barrier that loaded encoders before thinkers. **Drop both**.
 PR #430's process-scoped accounting handles spawn-order
-non-determinism by measurement instead of by ordering, and pre-spawn
-budget aggregation by the `PlacementConfig` cap handles the
-admission side.
+non-determinism by measurement instead of by ordering. Pre-spawn
+resident aggregation plus dynamic reserve validation handles the
+configuration-admission side.
 
 ### New field on `StageResourceConfig`
 
-The one field Phase 0 adds:
+The one field the Encoder TP PR adds:
 
 ```python
 class StageResourceConfig(BaseModel):
@@ -3656,28 +3797,30 @@ class StageResourceConfig(BaseModel):
             )
 ```
 
-`encoder_activation_budget_bytes` is **admission-only**. It is fed into
+`encoder_activation_budget_bytes` is **admission and reserve validation**.
+It is fed into
 `EncoderScheduler` as `max_batch_cost` and bounds the activation
-footprint of one batch's forward pass. It is independent of
-`total_gpu_memory_fraction`, which bounds the encoder process's
-overall residency:
+footprint of one batch's forward pass. It also participates in
+GPU-level dynamic reserve validation. It is distinct from
+`total_gpu_memory_fraction`, which is the stage resident/static
+placement budget:
 
-- `total_gpu_memory_fraction` controls how much GPU memory the encoder
-  process is allowed to occupy at steady state.
-- `encoder_activation_budget_bytes` controls how big a single batch's
-  activation peak can be inside that residency.
+- `total_gpu_memory_fraction` accounts for resident/static memory such
+  as weights, persistent buffers, and steady GPU-resident cache.
+- `encoder_activation_budget_bytes` accounts for temporary activation
+  peak and limits batch formation.
 
 The new field adds its own range check to `model_post_init` (positive
 int or `None`). The current `StageResourceConfig.model_post_init`
 (`sglang_omni/config/schema.py:59-64`) only validates
-`total_gpu_memory_fraction`; Phase 0 extends it as shown above.
+`total_gpu_memory_fraction`; the Encoder TP PR extends it as shown above.
 
 ### Injection contract for `encoder_activation_budget_bytes`
 
 `resolve_stage_factory_args` (`sglang_omni/config/runtime.py:15`)
 already injects `total_gpu_memory_fraction` when the resolved factory
 signature accepts it and `factory_args` / `runtime_overrides` do not
-already set it. Phase 0 mirrors the same shape for
+already set it. The Encoder TP PR mirrors the same shape for
 `encoder_activation_budget_bytes`:
 
 ```python
@@ -3750,11 +3893,17 @@ topology`) made two relevant changes:
    process raises `AssertionError` at spawn time.
 
 `get_stage_process_env` (`stage_process.py:292-319`) currently remaps
-`CUDA_VISIBLE_DEVICES` only when `tp_size > 1`. Phase 0 widens that
-condition to also fire when the resolved backend is `"sglang"` or
-`"auto"`, regardless of `tp_size`. The earlier proposed
-`single_visible_device` flag is **not** the mechanism — the condition
-moves into the existing predicate directly.
+`CUDA_VISIBLE_DEVICES` only when `tp_size > 1`. The Encoder TP PR
+widens that condition to also fire when the stage launch-mode map says
+`backend in {"sglang", "auto"}`, regardless of `tp_size`. The earlier
+proposed `single_visible_device` flag is **not** the mechanism — the
+condition moves into the existing predicate directly.
+
+That launch-mode map is computed before topology from
+`StageConfig.factory_args` plus typed runtime overrides. Factory
+defaults that affect launcher behavior are deliberately ignored by
+topology and `_build_stage_groups`; if a stage can launch SGLang, the
+config must make that visible before process groups are built.
 
 What this means for encoder TP launch:
 
@@ -3791,7 +3940,8 @@ SGLang-backed runner in the same OS process would trip that assertion
 the moment it tries to initialize its own TP group. SGLang doesn't
 support multiple disjoint TP groups inside one process today.
 
-Phase 0 rule: **any stage with resolved `backend in {"sglang", "auto"}`
+Encoder TP rule: **any stage with launch-mode
+`backend in {"sglang", "auto"}`
 must own its OS process exclusively**, regardless of `tp_size`. This
 extends the existing "TP stages must own their process exclusively"
 invariant in `stage_group.py:23-40` (which checks `tp_size > 1`) with a
@@ -3801,7 +3951,7 @@ Where the check belongs:
 
 - `_build_process_groups` (topology, `sglang_omni/config/topology.py:65-80`):
   when grouping non-TP stages by `stage.process`, validate that any
-  `ProcessGroupPlacement` containing a stage with resolved
+  `ProcessGroupPlacement` containing a stage with launch-mode
   `backend in {"sglang", "auto"}` has **exactly one** member.
   Equivalently: each SGLang-backed stage is its own singleton group.
   Two SGLang-backend stages with the same `stage.process` raises;
@@ -3815,14 +3965,14 @@ Where the check belongs:
   when the sibling never calls SGLang.
 - `_get_worker_process_env` (`stage_group.py:23-40`): extend the
   exclusivity assertion to fire when any `spec.stage_specs[i]` has
-  resolved `backend in {"sglang", "auto"}` and
+  launch-mode `backend in {"sglang", "auto"}` and
   `len(spec.stage_specs) > 1`. Belt-and-suspenders for callers that
   bypass the topology builder.
 
 What this rule does **not** require:
 
 - A user-visible `single_visible_device` config or schema field. The
-  launcher derives the required remap from the resolved backend.
+  launcher derives the required remap from the launch-mode map.
 - Forbidding co-location at the **GPU** level. Two SGLang-backed
   encoder stages on the same GPU are fine as long as they live in
   separate OS processes (the existing PR #430 colocation memory
@@ -3840,11 +3990,13 @@ exclusivity).
 
 ## Progress Tracking
 
-- [ ] Phase 0 land — `EncoderScheduler` + `SGLangEncoderRunner` +
-      Qwen3-Omni adapter, `backend="local"` default.
-- [ ] Phase 1 parity — image/audio encoder local-vs-sglang, tp1-vs-tp2.
-- [ ] Phase 2 — `backend="auto"` defaults to SGLang for Qwen3-Omni.
-- [ ] Phase 3 — delete duplicated local encoder files.
-- [ ] Phase 4 — general typed runtime overrides.
+- [ ] Encoder TP PR — `EncoderScheduler`, `SGLangEncoderRunner`,
+      Qwen3-Omni adapters, launch-mode map, SGLang process
+      exclusivity, single-device remap, `encoder_activation_budget_bytes`,
+      dynamic reserve validation, fatal-path plumbing, and parity lanes.
+- [ ] Follow-up — placement-aware Omni startup heuristic for deriving
+      stage-budget defaults.
+- [ ] Follow-up — profile / benchmark / OOM-feedback auto tuning.
+- [ ] Follow-up — delete duplicated local encoder files after one release.
 
-PR #334 (v1 base) must land first; this RFC's Phase 0 PR depends on it.
+PR #334 (v1 base) must land first; this RFC's Encoder TP PR depends on it.
