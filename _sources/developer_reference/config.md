@@ -76,20 +76,29 @@ stages = [
 | `factory_args` | `dict[str, Any]` | `{}` | Arguments forwarded to the factory. Runtime prep may inject `model_path` and `gpu_id` if the factory accepts them and they are not already set. |
 | `next` | `str`, `list[str]`, or `None` | `None` | Static downstream stage or stages for normal result routing. |
 | `terminal` | `bool` | `False` | Marks a stage as terminal; terminal results are sent to the coordinator. |
+| `route_fn` | `str` or `None` | `None` | Dotted function path for request-aware result routing. The function receives `(request_id, stage_output)` and returns a downstream stage name or list of stage names. |
 | `gpu` | `int`, `list[int]`, or `None` | `None` | GPU id for the stage. `None` means CPU placement. A list is used for tensor parallel ranks. |
 | `tp_size` | `int` | `1` | Number of tensor-parallel ranks. Must match `len(gpu)` when `gpu` is a list. |
 | `process` | `str` or `None` | `None` | OS process group identifier. Non-TP stages with the same `process` value share a single OS process; today every non-TP stage must declare one explicitly (see also `_validate_general`). For TP stages, `process` is optional and acts as a prefix for the derived rank-process names (`{process}_tp{rank}`); if unset, the stage name is used as the prefix. |
 | `wait_for` | `list[str]` or `None` | `None` | Upstream stages required before this stage can execute a request. |
+| `wait_for_fn` | `str` or `None` | `None` | Dotted function path for request-aware fan-in source selection. The function receives `(request_id, from_stage, payload)` and returns the active subset of `wait_for`, or `None` when the payload does not determine the subset yet. |
 | `merge_fn` | `str` or `None` | `None` | Dotted import path to the fan-in merge function. Required when `wait_for` is set. |
-| `stream_to` | `list[str]` | `[]` | Streaming targets for chunks such as hidden states or codec codes. This is parallel to normal result routing. |
+| `stream_to` | `list[str]` | `[]` | Static superset of streaming targets for chunks such as hidden states or codec codes. This is parallel to normal result routing. |
+| `stream_done_to_fn` | `str` or `None` | `None` | Dotted function path for request-aware stream-completion targets. The function receives `(request_id, stage_output)` and returns the active subset of `stream_to` targets that should receive the final done signal. |
 | `project_payload` | `dict[str, str]` | `{}` | Optional target-stage to dotted projection function mapping used before writing a downstream payload. |
 | `relay` | `RelayConfig` or `None` | `None` | Per-stage relay override. If unset, relay device and defaults are inferred from stage placement and `PipelineConfig.relay_backend`. |
 
-Routing rule: in current code, use `next` for static downstream routing or
-`terminal=True` for a terminal stage. Validation requires at least one of those;
-use exactly one by convention because terminal stages do not route downstream.
-The refactor tracking draft includes a `route_fn` field for future data-driven
-routing, but the current `StageConfig` schema does not accept `route_fn`.
+Routing rule: set exactly one of `next` or `terminal=True`. `route_fn` is an
+optional request-aware override for stages that already declare `next`; keep
+`next` as the static topology declaration for validation. `route_fn` is not
+valid on terminal stages and must return downstream stage targets, not `None`.
+Fan-in follows the same static-superset pattern: keep `wait_for` as the full set
+of possible upstream stages, and use `wait_for_fn` only to select the active
+per-request subset. The returned subset must be non-empty and contained in
+`wait_for`; returning `None` keeps the request pending until another upstream
+payload can resolve the active set.
+When using `stream_done_to_fn`, keep `stream_to` as the static superset because
+runtime prep derives stream receivers and same-GPU stream paths from it.
 
 Derived from stages:
 
@@ -109,11 +118,11 @@ Derived from stages:
 | `name` | `str` or `None` | `model_path` | Pipeline name. Used for reporting and runtime identification. |
 | `entry_stage` | `str` or `None` | first stage | Optional override for the stage that receives new requests. |
 | `relay_backend` | one of `shm`, `nccl`, `nixl`, `mooncake` | `shm` | Global relay backend used when creating per-stage relays. |
-| `fused_stages` | `list[list[str]]` | `[]` | Validated as adjacent stage groups, but fusion is not implemented yet. |
+| `fused_stages` | `list[list[str]]` | `[]` | Adjacent linear stage groups to colocate in one runtime process, enabling Stage-level local dispatch while preserving normal Stage ownership. |
 | `runtime_overrides` | `dict[str, dict[str, Any]]` | `{}` | Per-stage factory argument overrides applied during runtime prep. |
-| `endpoints` | `EndpointsConfig` | IPC defaults | Endpoint allocation settings: `scheme`, `base_path`, and `base_port`. |
-| `completion_endpoint` | `str` or `None` | `None` | Optional explicit coordinator completion endpoint. |
-| `abort_endpoint` | `str` or `None` | `None` | Optional explicit coordinator abort broadcast endpoint. |
+| `env_defaults` | `dict[str, str]` | `{}` | Environment defaults applied before stage factory imports. Existing process values take precedence. |
+| `endpoints` | `EndpointsConfig` | IPC defaults | Endpoint allocation settings. `base_path` controls where Unix-domain sockets are created. |
+| `terminal_stages_fn` | `str` or `None` | `None` | Dotted function path for request-aware terminal-stage resolution. The function receives the normalized `OmniRequest` and returns terminal stage names for that request, or `None` to use static terminals. |
 | `config_cls` | `str` or `None` | class name | Stored automatically and used when loading a saved config file. |
 
 Derived values are computed from stages, not manually maintained:
@@ -124,6 +133,25 @@ Derived values are computed from stages, not manually maintained:
 
 `RelayConfig` is the per-stage data-transfer override. It currently contains
 `slot_size_mb`, `credits`, `rank`, `world_size`, and `device`.
+
+### Stage Fusion
+
+`fused_stages` is a framework-level colocation hint. It keeps every listed
+logical stage as a normal `Stage`; it does not create a synthetic scheduler or
+move routing, relay, fan-in, streaming, abort, or terminal completion into the
+scheduler layer.
+
+At runtime prep, each fused group adds a process-colocation constraint. The
+process topology planner merges the process groups that contain those stages.
+Once colocated, ordinary Stage routing can use process-local object dispatch for
+eligible full-payload hops and process-local stream dispatch for same-process
+stream edges. Cross-process or unsafe fan-out edges still use the relay/control
+plane path.
+
+The first supported fusion form is conservative: a group must be adjacent,
+linear, non-TP, and fit on at most one GPU. Internal stages must route only to
+the next stage in the group. Existing explicit `process` groups are not split;
+if fusion connects two process groups, those groups are merged.
 
 ## Runtime Prep and Runner
 
