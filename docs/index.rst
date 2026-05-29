@@ -45,3 +45,9 @@ Our core features include:
    developer_reference/config.md
    developer_reference/communication.md
    developer_reference/profiler.md
+   developer_reference/encoder_tp_path_b_design_lean.md
+   developer_reference/encoder_tp_path_b_design.md
+   developer_reference/encoder_tp_design_checklist.md
+   developer_reference/encoder_tp_parity_findings.md
+   developer_reference/encoder_tp_performance_report.md
+   developer_reference/encoder_tp_pr_draft.md

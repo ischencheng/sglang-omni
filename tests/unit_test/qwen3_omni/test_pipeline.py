@@ -607,6 +607,7 @@ def test_qwen_cli_rejects_global_mem_fraction_when_pipeline_has_no_supported_rol
 
 def test_qwen_cli_encoder_mem_reserve_routes_as_thinker_factory_arg() -> None:
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+    _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction = None
 
     apply_encoder_mem_reserve_cli_override(
         config,
@@ -619,6 +620,32 @@ def test_qwen_cli_encoder_mem_reserve_routes_as_thinker_factory_arg() -> None:
     assert thinker_args["encoder_mem_reserve"] == 0.15
     assert "encoder_mem_reserve" not in thinker_args.get("server_args_overrides", {})
     assert "encoder_mem_reserve" not in _stage(config, "talker_ar").factory_args
+
+
+def test_qwen_default_encoder_configs_use_auto_backend() -> None:
+    config = Qwen3OmniPipelineConfig(model_path="dummy")
+
+    image = _stage(config, "image_encoder")
+    audio = _stage(config, "audio_encoder")
+
+    assert image.factory_args["backend"] == "auto"
+    assert audio.factory_args["backend"] == "auto"
+    assert image.process == "image_encoder"
+    assert audio.process == "audio_encoder"
+    assert image.runtime.resources.encoder_activation_budget_bytes is not None
+    assert audio.runtime.resources.encoder_activation_budget_bytes is not None
+
+
+def test_qwen_cli_encoder_mem_reserve_rejects_typed_total_budget() -> None:
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    with pytest.raises(typer.BadParameter, match="total_gpu_memory_fraction"):
+        apply_encoder_mem_reserve_cli_override(
+            config,
+            encoder_mem_reserve=0.15,
+            mem_fraction_static=None,
+            thinker_mem_fraction_static=None,
+        )
 
 
 def test_qwen_cli_encoder_mem_reserve_is_exclusive_with_thinker_auto_path_pins() -> (
@@ -647,6 +674,7 @@ def test_qwen_cli_encoder_mem_reserve_rejects_config_pinned_thinker_mem_fraction
     None
 ):
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+    _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction = None
     thinker_args = _stage(config, "thinker").factory_args
     thinker_args["server_args_overrides"] = {"mem_fraction_static": 0.70}
 
@@ -668,6 +696,7 @@ def test_qwen_cli_encoder_mem_reserve_rejects_runtime_pinned_thinker_mem_fractio
             "thinker": {"server_args_overrides": {"mem_fraction_static": 0.70}}
         },
     )
+    _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction = None
 
     with pytest.raises(typer.BadParameter, match="not explicitly pinned"):
         apply_encoder_mem_reserve_cli_override(
@@ -682,6 +711,7 @@ def test_qwen_cli_encoder_mem_reserve_rejects_typed_pinned_thinker_mem_fraction(
     None
 ):
     config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+    _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction = None
     _stage(config, "thinker").runtime.sglang_server_args.mem_fraction_static = 0.70
 
     with pytest.raises(typer.BadParameter, match="not explicitly pinned"):
@@ -698,6 +728,7 @@ def test_qwen_cli_encoder_mem_reserve_survives_runtime_overrides_overlay() -> No
         model_path="dummy",
         runtime_overrides={"thinker": {"encoder_mem_reserve": 0.10}},
     )
+    _stage(config, "thinker").runtime.resources.total_gpu_memory_fraction = None
 
     apply_encoder_mem_reserve_cli_override(
         config,
@@ -769,7 +800,7 @@ def test_qwen_factory_signatures_keep_reserve_thinker_only() -> None:
     )
     talker_sig = inspect.signature(qwen_stages.create_talker_ar_executor_from_config)
 
-    assert thinker_sig.parameters["encoder_mem_reserve"].default == 0.05
+    assert thinker_sig.parameters["encoder_mem_reserve"].default == 0.0
     assert "encoder_mem_reserve" not in talker_sig.parameters
 
 
