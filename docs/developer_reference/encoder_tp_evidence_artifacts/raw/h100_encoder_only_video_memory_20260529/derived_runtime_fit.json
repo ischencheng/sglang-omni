@@ -1,0 +1,83 @@
+{
+  "frame_cap_fit": {
+    "crossover_frame_cap": -610.6985892928645,
+    "tp1": {
+      "A_mib": 10569.441412520062,
+      "b_mib_per_unit": 8.610955056179776,
+      "n": 7,
+      "r2": 0.9047172725678764
+    },
+    "tp2_max_rank": {
+      "A_mib": 9364.823434991975,
+      "b_mib_per_unit": 6.63843047752809,
+      "n": 7,
+      "r2": 0.9074902300206116
+    }
+  },
+  "points": [
+    {
+      "frame_cap": 128,
+      "tp1_peak_mib": 8910,
+      "tp2_max_rank_peak_mib": 8164,
+      "tp2_sum_peak_mib": 16306,
+      "visual_tokens_pre_merge": 147456
+    },
+    {
+      "frame_cap": 256,
+      "tp1_peak_mib": 15590,
+      "tp2_max_rank_peak_mib": 13204,
+      "tp2_sum_peak_mib": 26386,
+      "visual_tokens_pre_merge": 294912
+    },
+    {
+      "frame_cap": 512,
+      "tp1_peak_mib": 16730,
+      "tp2_max_rank_peak_mib": 14084,
+      "tp2_sum_peak_mib": 28146,
+      "visual_tokens_pre_merge": 319488
+    },
+    {
+      "frame_cap": 768,
+      "tp1_peak_mib": 16150,
+      "tp2_max_rank_peak_mib": 13644,
+      "tp2_sum_peak_mib": 27266,
+      "visual_tokens_pre_merge": 307200
+    },
+    {
+      "frame_cap": 1024,
+      "tp1_peak_mib": 18992,
+      "tp2_max_rank_peak_mib": 15844,
+      "tp2_sum_peak_mib": 31666,
+      "visual_tokens_pre_merge": 368640
+    },
+    {
+      "frame_cap": 1536,
+      "tp1_peak_mib": 22412,
+      "tp2_max_rank_peak_mib": 18486,
+      "tp2_sum_peak_mib": 36950,
+      "visual_tokens_pre_merge": 442368
+    },
+    {
+      "frame_cap": 2048,
+      "tp1_peak_mib": 29210,
+      "tp2_max_rank_peak_mib": 23764,
+      "tp2_sum_peak_mib": 47506,
+      "visual_tokens_pre_merge": 589824
+    }
+  ],
+  "premerge_token_k_fit": {
+    "crossover_k_premerge_tokens": 70.36886612986926,
+    "tp1": {
+      "A_mib": 2069.0034311856643,
+      "b_mib_per_unit": 47.060935315796165,
+      "n": 7,
+      "r2": 0.9999634868189191
+    },
+    "tp2_max_rank": {
+      "A_mib": 2831.710636675564,
+      "b_mib_per_unit": 36.222232812301435,
+      "n": 7,
+      "r2": 0.9998028429620196
+    }
+  }
+}

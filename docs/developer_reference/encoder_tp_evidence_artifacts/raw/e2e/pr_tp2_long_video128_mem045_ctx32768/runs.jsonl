@@ -1,0 +1,1 @@
+{"case_id": "pr_tp2_long_video128_mem045_ctx32768", "index": 0, "latency_s": 7.538585697999224, "ok": false, "response_body": {"detail": "The input (18944 tokens) is longer than the model's context length (8192 tokens)."}, "response_error": null, "response_status": 400, "response_text": "", "validation_errors": ["empty response text"], "warmup": false}

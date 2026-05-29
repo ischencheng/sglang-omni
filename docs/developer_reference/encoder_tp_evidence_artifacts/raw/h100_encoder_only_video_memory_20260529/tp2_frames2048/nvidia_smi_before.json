@@ -1,0 +1,73 @@
+{
+  "gpu_result": null,
+  "gpus": [
+    {
+      "index": 0,
+      "memory_free_mib": 1771,
+      "memory_used_mib": 79309,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-c73e6995-bf09-8af1-96e3-17da9531399f"
+    },
+    {
+      "index": 1,
+      "memory_free_mib": 81076,
+      "memory_used_mib": 4,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-973ab323-059a-16d1-6542-dd2662b76360"
+    },
+    {
+      "index": 2,
+      "memory_free_mib": 11326,
+      "memory_used_mib": 69753,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-86b045a3-7386-7026-6f7d-9aa75a667880"
+    },
+    {
+      "index": 3,
+      "memory_free_mib": 81070,
+      "memory_used_mib": 10,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-991e0141-8bcb-6f9c-7737-01063141cd23"
+    },
+    {
+      "index": 4,
+      "memory_free_mib": 81074,
+      "memory_used_mib": 6,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-e4ac2e96-1b46-aa1f-dba3-86509a07a1ff"
+    },
+    {
+      "index": 5,
+      "memory_free_mib": 81076,
+      "memory_used_mib": 4,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-8c2e7fe8-6622-46fc-374a-1b0bea3c1a31"
+    },
+    {
+      "index": 6,
+      "memory_free_mib": 81076,
+      "memory_used_mib": 4,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-e9f60c1d-8856-043c-42cd-47a942a4d8f1"
+    },
+    {
+      "index": 7,
+      "memory_free_mib": 81076,
+      "memory_used_mib": 4,
+      "name": "NVIDIA H100 80GB HBM3",
+      "utilization_gpu_percent": 0,
+      "uuid": "GPU-6a051904-54a1-9fbc-ed92-1c8ea133e232"
+    }
+  ],
+  "ok": true,
+  "process_result": null,
+  "processes": [],
+  "time_s": 1780032693.182143
+}

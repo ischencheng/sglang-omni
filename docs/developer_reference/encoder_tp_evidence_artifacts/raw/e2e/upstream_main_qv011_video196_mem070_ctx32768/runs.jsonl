@@ -1,0 +1,1 @@
+{"case_id": "upstream_main_qv011_video196_mem070_ctx32768", "index": 0, "latency_s": 36.11186770099448, "ok": false, "response_body": {"detail": "The input (35688 tokens) is longer than the model's context length (32768 tokens)."}, "response_error": null, "response_status": 400, "response_text": "", "validation_errors": ["empty response text"], "warmup": false}

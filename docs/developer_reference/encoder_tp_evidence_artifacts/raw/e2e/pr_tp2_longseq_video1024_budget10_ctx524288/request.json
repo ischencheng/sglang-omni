@@ -1,0 +1,20 @@
+{
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Briefly describe the video.",
+      "role": "user"
+    }
+  ],
+  "modalities": [
+    "text"
+  ],
+  "model": "qwen3-omni",
+  "stream": false,
+  "video_fps": 30.0,
+  "video_max_frames": 1024,
+  "video_max_pixels": 401408,
+  "videos": [
+    "/data/encoder_tp_evidence_20260526/media/draw_loop_2048frames.mp4"
+  ]
+}

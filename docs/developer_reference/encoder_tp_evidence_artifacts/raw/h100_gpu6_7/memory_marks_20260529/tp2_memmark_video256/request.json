@@ -1,0 +1,19 @@
+{
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Briefly describe the video.",
+      "role": "user"
+    }
+  ],
+  "modalities": [
+    "text"
+  ],
+  "model": "qwen3-omni",
+  "stream": false,
+  "video_fps": 30.0,
+  "video_max_frames": 256,
+  "videos": [
+    "tests/data/draw.mp4"
+  ]
+}

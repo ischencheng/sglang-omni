@@ -1,0 +1,599 @@
+{
+  "artifact_root": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528",
+  "benchmark_name": "encoder_tp_smoke_quality_video128_audio30",
+  "ci_artifact": {
+    "checks": "statusCheckRollup empty from gh pr view",
+    "head_ref": "encoder-tp-plan-b-phase0",
+    "head_sha": "53328e698952ec14557702a3f00e676f9ded765a",
+    "pr_number": 423,
+    "pr_url": "https://github.com/sgl-project/sglang-omni/pull/423",
+    "run_lookup": [
+      "gh run list --repo sgl-project/sglang-omni --branch encoder-tp-plan-b-phase0 --limit 20 returned no runs",
+      "gh run list --repo ischencheng/sglang-omni --branch encoder-tp-plan-b-phase0 --limit 20 returned no runs"
+    ],
+    "status": "unavailable"
+  },
+  "combined": {
+    "main": {
+      "delta_vs_main": 0.0,
+      "passes": 6,
+      "score": 1.0,
+      "total": 6
+    },
+    "pr_tp1": {
+      "delta_vs_main": 0.0,
+      "passes": 6,
+      "score": 1.0,
+      "total": 6
+    },
+    "pr_tp2": {
+      "delta_vs_main": 0.0,
+      "passes": 6,
+      "score": 1.0,
+      "total": 6
+    }
+  },
+  "created_utc": "2026-05-28",
+  "fixed_conditions": {
+    "audio": {
+      "max_tokens": 32,
+      "media": "/data/encoder_tp_evidence_20260526/long_query_to_cars_30s.wav",
+      "modalities": [
+        "text"
+      ],
+      "prompt": "Briefly describe the audio.",
+      "stream": false
+    },
+    "checkpoint": "/data/qwen3omni",
+    "checkpoint_snapshot": "26291f793822fb6be9555850f06dfe95f2d7e695",
+    "qwen_vl_utils_during_run": "0.0.11",
+    "same_prompt_media_decoding": true,
+    "video": {
+      "max_tokens": 16,
+      "media": "tests/data/draw.mp4",
+      "modalities": [
+        "text"
+      ],
+      "prompt": "Briefly describe the video.",
+      "stream": false,
+      "video_fps": 16,
+      "video_max_frames": 128,
+      "video_max_pixels": 401408
+    }
+  },
+  "rubric": {
+    "audio30": "Pass if the response identifies the repeated \"how many cars\" question using repeat/repetitive/multiple/twenty wording.",
+    "video128": "Pass if the response describes drawing and mentions a tablet, stylus, or iPad."
+  },
+  "samples": [
+    {
+      "case_id": "main_qv011_video128_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 8.022586435079575,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "Certainly. The video shows a person drawing on a digital tablet using a stylus",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "main_qv011_video128_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 7.610795671120286,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "A close-up of a person drawing a guitar using a tablet and a stylus",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "main_qv011_video128_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 7.674147770740092,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "The video depicts a close-up of a person using a digital drawing tablet and styl",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 8.298768933862448,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "Certainly. The video shows a person drawing on a digital tablet using a stylus",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 8.237116076983511,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "A person is using a stylus to draw on a tablet. The tablet is",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 8.181764801032841,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "The video depicts a close-up of a person using a digital drawing tablet and styl",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 13.905688344035298,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "Certainly. The video shows a person drawing on a digital tablet using a stylus",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp2",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 13.76198434876278,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "A person is using a stylus to draw on a tablet. The tablet is",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp2",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_video128_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 16,
+      "http_status": 200,
+      "latency_s": 13.44305098010227,
+      "ok": true,
+      "prompt_tokens": 18944,
+      "response_text": "The video depicts a person using a digital drawing tablet, specifically an iPad, to",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "video128",
+      "total_tokens": 18960,
+      "variant": "pr_tp2",
+      "warmup": false
+    },
+    {
+      "case_id": "main_qv011_audio30_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.310626856982708,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio clip consists of a single male voice repeating the question, \"How many cars are there in the picture?\", twenty times. The recording is of exceptionally high",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "main_qv011_audio30_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.3087310241535306,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "This audio recording features a repetitive, synthesized-sounding male voice asking the question, \"How many cars are there in the picture?\" multiple times in a row.",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "main_qv011_audio30_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.2886151187121868,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio consists of a repetitive phrase spoken by a man, asking, \"How many cars are there in the picture?\" in a calm, even tone.",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "main",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.2954537123441696,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio clip consists of a single male voice repeating the question, \"How many cars are there in the picture?\", twenty times. The recording is of low fidelity",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.2878277041018009,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "This audio recording features a repetitive, synthesized-sounding male voice asking the question, \"How many cars are there in the picture?\" multiple times in a row.",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp1_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.28403830295428634,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio consists of a repetitive phrase spoken by a man, asking, \"How many cars are there in the picture?\" in a calm, even tone.",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp1",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.3288592789322138,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio clip consists of a single male voice repeating the question, \"How many cars are there in the picture?\", twenty times. The recording is of exceptionally high",
+      "rubric_pass": true,
+      "run_index": 1,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp2",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.31597790215164423,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "This audio recording features a repetitive, synthesized-sounding male voice asking the question, \"How many cars are there in the picture?\" multiple times in a row.",
+      "rubric_pass": true,
+      "run_index": 2,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp2",
+      "warmup": false
+    },
+    {
+      "case_id": "pr_tp2_audio30_qv011_mem080_ctx32768_warmed",
+      "completion_tokens": 32,
+      "http_status": 200,
+      "latency_s": 0.3178364457562566,
+      "ok": true,
+      "prompt_tokens": 406,
+      "response_text": "The audio consists of a repetitive phrase spoken by a man, asking, \"How many cars are there in the picture?\" in a calm, even tone.",
+      "rubric_pass": true,
+      "run_index": 3,
+      "task": "audio30",
+      "total_tokens": 438,
+      "variant": "pr_tp2",
+      "warmup": false
+    }
+  ],
+  "scope": "Local smoke quality benchmark subset only; not a full task-level quality benchmark.",
+  "summary": {
+    "main": {
+      "audio30": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/main_qv011_audio30_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "audios": [
+            "/data/encoder_tp_evidence_20260526/long_query_to_cars_30s.wav"
+          ],
+          "max_tokens": 32,
+          "messages": [
+            {
+              "content": "Briefly describe the audio.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false
+        },
+        "score": 1.0
+      },
+      "video128": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/main_qv011_video128_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "max_tokens": 16,
+          "messages": [
+            {
+              "content": "Briefly describe the video.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false,
+          "video_fps": 16.0,
+          "video_max_frames": 128,
+          "video_max_pixels": 401408,
+          "videos": [
+            "tests/data/draw.mp4"
+          ]
+        },
+        "score": 1.0
+      }
+    },
+    "pr_tp1": {
+      "audio30": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/pr_tp1_audio30_qv011_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "audios": [
+            "/data/encoder_tp_evidence_20260526/long_query_to_cars_30s.wav"
+          ],
+          "max_tokens": 32,
+          "messages": [
+            {
+              "content": "Briefly describe the audio.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false
+        },
+        "score": 1.0
+      },
+      "video128": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/pr_tp1_video128_qv011_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "max_tokens": 16,
+          "messages": [
+            {
+              "content": "Briefly describe the video.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false,
+          "video_fps": 16.0,
+          "video_max_frames": 128,
+          "video_max_pixels": 401408,
+          "videos": [
+            "tests/data/draw.mp4"
+          ]
+        },
+        "score": 1.0
+      }
+    },
+    "pr_tp2": {
+      "audio30": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/pr_tp2_audio30_qv011_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "audios": [
+            "/data/encoder_tp_evidence_20260526/long_query_to_cars_30s.wav"
+          ],
+          "max_tokens": 32,
+          "messages": [
+            {
+              "content": "Briefly describe the audio.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false
+        },
+        "score": 1.0
+      },
+      "video128": {
+        "case_dir": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/latency_main_pr_tp_20260528/pr_tp2_video128_qv011_mem080_ctx32768_warmed",
+        "environment_keys": [
+          "cwd",
+          "platform",
+          "python",
+          "repo",
+          "torch"
+        ],
+        "git_head": {
+          "cmd": [
+            "git",
+            "rev-parse",
+            "HEAD"
+          ],
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "15b5e7c94ddccd0325f061e7500377ddfccd0434\n"
+        },
+        "measured_repeats": 3,
+        "passes": 3,
+        "request": {
+          "max_tokens": 16,
+          "messages": [
+            {
+              "content": "Briefly describe the video.",
+              "role": "user"
+            }
+          ],
+          "modalities": [
+            "text"
+          ],
+          "model": "qwen3-omni",
+          "stream": false,
+          "video_fps": 16.0,
+          "video_max_frames": 128,
+          "video_max_pixels": 401408,
+          "videos": [
+            "tests/data/draw.mp4"
+          ]
+        },
+        "score": 1.0
+      }
+    }
+  },
+  "threshold": "Pass if PR TP1 and PR TP2 have no per-task pass-rate drop vs main and combined delta vs main is >= 0.0 percentage points on this fixed subset."
+}

@@ -1,0 +1,14 @@
+{
+  "case_id": "pr_tp2_video196_mem045_ctx65536",
+  "failures": 0,
+  "health_after_ok": true,
+  "health_before_ok": true,
+  "latency_s_max": 34.30750922602601,
+  "latency_s_mean": 34.30750922602601,
+  "latency_s_p50": 34.30750922602601,
+  "latency_s_stdev": null,
+  "measured_runs": 1,
+  "output_dir": "/data/encoder_tp_evidence_20260526/e2e/pr_tp2_video196_mem045_ctx65536",
+  "successes": 1,
+  "total_runs": 1
+}

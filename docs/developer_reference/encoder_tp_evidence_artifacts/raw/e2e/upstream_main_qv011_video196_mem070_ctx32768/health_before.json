@@ -1,0 +1,5 @@
+{
+  "body": "{\"status\":\"healthy\",\"running\":true,\"stages\":[\"preprocessing\",\"image_encoder\",\"audio_encoder\",\"mm_aggregate\",\"thinker\",\"decode\"],\"entry_stage\":\"preprocessing\",\"total_requests\":0,\"pending_completions\":0,\"request_states\":{}}",
+  "ok": true,
+  "status": 200
+}

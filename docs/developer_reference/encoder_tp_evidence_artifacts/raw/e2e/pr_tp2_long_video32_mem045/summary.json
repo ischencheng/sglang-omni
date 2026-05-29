@@ -1,0 +1,14 @@
+{
+  "case_id": "pr_tp2_long_video32_mem045",
+  "failures": 0,
+  "health_after_ok": true,
+  "health_before_ok": true,
+  "latency_s_max": 8.661459389026277,
+  "latency_s_mean": 8.661459389026277,
+  "latency_s_p50": 8.661459389026277,
+  "latency_s_stdev": null,
+  "measured_runs": 1,
+  "output_dir": "/data/encoder_tp_evidence_20260526/e2e/pr_tp2_long_video32_mem045",
+  "successes": 1,
+  "total_runs": 1
+}

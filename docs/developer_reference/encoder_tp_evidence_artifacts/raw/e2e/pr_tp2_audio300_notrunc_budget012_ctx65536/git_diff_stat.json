@@ -1,0 +1,10 @@
+{
+  "cmd": [
+    "git",
+    "diff",
+    "--stat"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": " docs/index.rst                                     |   6 +\n examples/run_qwen3_omni_server.py                  |   4 +\n sglang_omni/cli/serve.py                           |   8 +\n sglang_omni/client/client.py                       |   1 +\n sglang_omni/config/__init__.py                     |  12 +-\n sglang_omni/config/placement.py                    |  63 ++++++\n sglang_omni/config/runtime.py                      | 140 +++++++++++++\n sglang_omni/config/schema.py                       |  13 ++\n sglang_omni/config/topology.py                     |  22 ++\n .../models/qwen3_omni/components/preprocessor.py   |  10 +\n sglang_omni/models/qwen3_omni/config.py            |  36 +++-\n sglang_omni/models/qwen3_omni/stages.py            | 230 ++++++++++++++++++---\n sglang_omni/pipeline/coordinator.py                |  18 +-\n sglang_omni/pipeline/mp_runner.py                  | 119 +++++++++--\n sglang_omni/pipeline/runtime_config.py             |   5 +\n sglang_omni/pipeline/stage_group.py                |  15 +-\n sglang_omni/pipeline/stage_process.py              |  10 +-\n sglang_omni/preprocessing/video.py                 |  69 ++++++-\n sglang_omni/scheduling/sglang_backend/__init__.py  |   2 +\n .../sglang_backend/server_args_builder.py          |  71 ++++++-\n sglang_omni/serve/openai_api.py                    |   2 +\n sglang_omni/serve/protocol.py                      |   3 +\n tests/unit_test/fixtures/pipeline_fakes.py         |  26 +++\n tests/unit_test/pipeline/test_compile.py           |   1 +\n tests/unit_test/pipeline/test_runtime_adapter.py   |  35 ++++\n tests/unit_test/pipeline/test_runtime_schema.py    |   5 +\n tests/unit_test/pipeline/test_topology.py          |  82 +++++++-\n tests/unit_test/qwen3_omni/test_config_manager.py  |  33 +--\n tests/unit_test/qwen3_omni/test_pipeline.py        |  33 ++-\n .../unit_test/qwen3_omni/test_sglang_ar_budget.py  |  37 +---\n tests/unit_test/serve/test_openai_api.py           |  16 ++\n 31 files changed, 1018 insertions(+), 109 deletions(-)\n"
+}

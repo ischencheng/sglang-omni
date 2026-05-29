@@ -1,0 +1,210 @@
+{
+  "fits": {
+    "tp1_image_max_rank": {
+      "A_mib": 2096.0,
+      "b_mib_per_frame": 52.625,
+      "n": 4,
+      "r2": 0.9993853961093883
+    },
+    "tp1_visible_whole_gpu_max": {
+      "A_mib": 69085.2,
+      "b_mib_per_frame": 52.65,
+      "n": 4,
+      "r2": 0.9993769154526488
+    },
+    "tp2_image_max_rank": {
+      "A_mib": 2736.0,
+      "b_mib_per_frame": 54.9375,
+      "n": 4,
+      "r2": 0.9976061820928476
+    },
+    "tp2_visible_whole_gpu_max": {
+      "A_mib": 70433.2,
+      "b_mib_per_frame": 40.8375,
+      "n": 4,
+      "r2": 0.996123036949723
+    }
+  },
+  "rows": [
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp1_frames64",
+      "frame_cap": 64,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 4464,
+          "max_memory_used_mib": 72441,
+          "min_memory_free_mib": 8639
+        },
+        "3": {
+          "max_memory_delta_mib": 0,
+          "max_memory_used_mib": 10143,
+          "min_memory_free_mib": 70937
+        }
+      },
+      "image_max_rank_peak_mib": 5450,
+      "probe_failures": 0,
+      "prompt_tokens": 18448,
+      "success": true,
+      "tp_size": 1,
+      "visible_whole_gpu_max_mib": 72441
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp1_frames96",
+      "frame_cap": 96,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 6204,
+          "max_memory_used_mib": 74121,
+          "min_memory_free_mib": 6959
+        },
+        "3": {
+          "max_memory_delta_mib": 0,
+          "max_memory_used_mib": 10143,
+          "min_memory_free_mib": 70937
+        }
+      },
+      "image_max_rank_peak_mib": 7130,
+      "probe_failures": 0,
+      "prompt_tokens": 27664,
+      "success": true,
+      "tp_size": 1,
+      "visible_whole_gpu_max_mib": 74121
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp1_frames128",
+      "frame_cap": 128,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 7926,
+          "max_memory_used_mib": 75903,
+          "min_memory_free_mib": 5177
+        },
+        "3": {
+          "max_memory_delta_mib": 0,
+          "max_memory_used_mib": 10143,
+          "min_memory_free_mib": 70937
+        }
+      },
+      "image_max_rank_peak_mib": 8910,
+      "probe_failures": 0,
+      "prompt_tokens": 36880,
+      "success": true,
+      "tp_size": 1,
+      "visible_whole_gpu_max_mib": 75903
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp1_frames160",
+      "frame_cap": 160,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 9486,
+          "max_memory_used_mib": 77463,
+          "min_memory_free_mib": 3617
+        },
+        "3": {
+          "max_memory_delta_mib": 0,
+          "max_memory_used_mib": 10143,
+          "min_memory_free_mib": 70937
+        }
+      },
+      "image_max_rank_peak_mib": 10470,
+      "probe_failures": 0,
+      "prompt_tokens": 46096,
+      "success": true,
+      "tp_size": 1,
+      "visible_whole_gpu_max_mib": 77463
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp2_frames64",
+      "frame_cap": 64,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 4232,
+          "max_memory_used_mib": 73061,
+          "min_memory_free_mib": 8019
+        },
+        "3": {
+          "max_memory_delta_mib": 4066,
+          "max_memory_used_mib": 18836,
+          "min_memory_free_mib": 62244
+        }
+      },
+      "image_max_rank_peak_mib": 6164,
+      "probe_failures": 0,
+      "prompt_tokens": 18448,
+      "success": true,
+      "tp_size": 2,
+      "visible_whole_gpu_max_mib": 73061
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp2_frames96",
+      "frame_cap": 96,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 5432,
+          "max_memory_used_mib": 74261,
+          "min_memory_free_mib": 6819
+        },
+        "3": {
+          "max_memory_delta_mib": 5986,
+          "max_memory_used_mib": 20756,
+          "min_memory_free_mib": 60324
+        }
+      },
+      "image_max_rank_peak_mib": 8084,
+      "probe_failures": 0,
+      "prompt_tokens": 27664,
+      "success": true,
+      "tp_size": 2,
+      "visible_whole_gpu_max_mib": 74261
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp2_frames128",
+      "frame_cap": 128,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 6974,
+          "max_memory_used_mib": 75803,
+          "min_memory_free_mib": 5277
+        },
+        "3": {
+          "max_memory_delta_mib": 7786,
+          "max_memory_used_mib": 22556,
+          "min_memory_free_mib": 58524
+        }
+      },
+      "image_max_rank_peak_mib": 9884,
+      "probe_failures": 0,
+      "prompt_tokens": 36880,
+      "success": true,
+      "tp_size": 2,
+      "visible_whole_gpu_max_mib": 75803
+    },
+    {
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_colocated_video_memory_slope_20260529_budget10/tp2_frames160",
+      "frame_cap": 160,
+      "gpu_peaks_visible": {
+        "1": {
+          "max_memory_delta_mib": 8074,
+          "max_memory_used_mib": 76903,
+          "min_memory_free_mib": 4177
+        },
+        "3": {
+          "max_memory_delta_mib": 9326,
+          "max_memory_used_mib": 24096,
+          "min_memory_free_mib": 56984
+        }
+      },
+      "image_max_rank_peak_mib": 11424,
+      "probe_failures": 0,
+      "prompt_tokens": 46096,
+      "success": true,
+      "tp_size": 2,
+      "visible_whole_gpu_max_mib": 76903
+    }
+  ],
+  "visible_gpus": [
+    1,
+    3
+  ]
+}

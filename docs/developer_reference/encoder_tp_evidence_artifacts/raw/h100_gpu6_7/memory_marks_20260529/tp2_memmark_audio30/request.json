@@ -1,0 +1,17 @@
+{
+  "audios": [
+    "/data/encoder_tp_evidence_20260526/long_query_to_cars_30s.wav"
+  ],
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Transcribe or summarize the audio briefly.",
+      "role": "user"
+    }
+  ],
+  "modalities": [
+    "text"
+  ],
+  "model": "qwen3-omni",
+  "stream": false
+}

@@ -1,0 +1,20 @@
+{
+  "audios": [
+    "tests/data/query_to_cars.wav"
+  ],
+  "max_tokens": 32,
+  "messages": [
+    {
+      "content": "Briefly describe the video and audio.",
+      "role": "user"
+    }
+  ],
+  "modalities": [
+    "text"
+  ],
+  "model": "qwen3-omni",
+  "stream": false,
+  "videos": [
+    "tests/data/draw.mp4"
+  ]
+}

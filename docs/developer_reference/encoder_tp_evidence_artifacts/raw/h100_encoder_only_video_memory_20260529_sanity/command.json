@@ -1,0 +1,28 @@
+{
+  "argv": [
+    "examples/encoder_tp_encoder_only_video_probe.py",
+    "--model-path",
+    "/data/qwen3omni",
+    "--video",
+    "/data/encoder_tp_evidence_20260526/media/draw_loop_2048frames.mp4",
+    "--output-dir",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_memory_20260529_sanity",
+    "--frame-caps",
+    "128",
+    "--tp1-gpu",
+    "6",
+    "--tp2-gpus",
+    "6,7",
+    "--video-fps",
+    "30",
+    "--timeout",
+    "900",
+    "--gpu-sample-interval",
+    "0.5"
+  ],
+  "cwd": "/data/sglang-omni",
+  "env": {
+    "CUDA_VISIBLE_DEVICES": null,
+    "PYTORCH_CUDA_ALLOC_CONF": null
+  }
+}

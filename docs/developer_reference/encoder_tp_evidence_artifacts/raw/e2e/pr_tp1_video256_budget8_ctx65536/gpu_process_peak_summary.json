@@ -1,0 +1,185 @@
+{
+  "processes": [
+    {
+      "final_used_memory_mib": 63916,
+      "gpu_uuid": "GPU-1d3596bf-ce9f-b6e2-ea24-64b30028c68d",
+      "initial_used_memory_mib": 63916,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 63916,
+      "pid": 2664316,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 58796,
+      "gpu_uuid": "GPU-36281276-6f4e-7a8a-056a-c65e2b56f7f8",
+      "initial_used_memory_mib": 58796,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 58796,
+      "pid": 2664319,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 123244,
+      "gpu_uuid": "GPU-3b939e4c-8f35-ece2-e06b-c59e6a670c6b",
+      "initial_used_memory_mib": 123244,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 123244,
+      "pid": 1596891,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 18400,
+      "gpu_uuid": "GPU-3b939e4c-8f35-ece2-e06b-c59e6a670c6b",
+      "initial_used_memory_mib": 18400,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 18400,
+      "pid": 1625299,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 53604,
+      "gpu_uuid": "GPU-4cea1c26-1793-f71f-8327-6fac59f815ec",
+      "initial_used_memory_mib": 53604,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 53604,
+      "pid": 2664317,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 66014,
+      "gpu_uuid": "GPU-4cea1c26-1793-f71f-8327-6fac59f815ec",
+      "initial_used_memory_mib": 66014,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 66014,
+      "pid": 3491218,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 32260,
+      "gpu_uuid": "GPU-7144cb59-1e5d-2e27-bab5-ebd363c6a338",
+      "initial_used_memory_mib": 32260,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 32260,
+      "pid": 2245241,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 55876,
+      "gpu_uuid": "GPU-7144cb59-1e5d-2e27-bab5-ebd363c6a338",
+      "initial_used_memory_mib": 55876,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 55876,
+      "pid": 2627765,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 27940,
+      "gpu_uuid": "GPU-7144cb59-1e5d-2e27-bab5-ebd363c6a338",
+      "initial_used_memory_mib": 27940,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 27940,
+      "pid": 2651485,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 20870,
+      "gpu_uuid": "GPU-7144cb59-1e5d-2e27-bab5-ebd363c6a338",
+      "initial_used_memory_mib": 20870,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 20870,
+      "pid": 2966080,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 5592,
+      "gpu_uuid": "GPU-7144cb59-1e5d-2e27-bab5-ebd363c6a338",
+      "initial_used_memory_mib": 5592,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 5592,
+      "pid": 4183487,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 66168,
+      "gpu_uuid": "GPU-af92703c-4aaf-c8a4-3e19-5754e8a9efce",
+      "initial_used_memory_mib": 66168,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 66168,
+      "pid": 2664318,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 64306,
+      "gpu_uuid": "GPU-af92703c-4aaf-c8a4-3e19-5754e8a9efce",
+      "initial_used_memory_mib": 64306,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 64306,
+      "pid": 3491220,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 946,
+      "gpu_uuid": "GPU-af92703c-4aaf-c8a4-3e19-5754e8a9efce",
+      "initial_used_memory_mib": 946,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 946,
+      "pid": 3491221,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 124592,
+      "gpu_uuid": "GPU-ed01a487-2b95-9c91-bce4-9dbae463fd49",
+      "initial_used_memory_mib": 124592,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 124592,
+      "pid": 1850647,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 1984,
+      "gpu_uuid": "GPU-ed01a487-2b95-9c91-bce4-9dbae463fd49",
+      "initial_used_memory_mib": 1984,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 1984,
+      "pid": 3491216,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 124594,
+      "gpu_uuid": "GPU-ee08c50e-bdff-b6c4-8009-9e3faad478c7",
+      "initial_used_memory_mib": 124594,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 124594,
+      "pid": 1850637,
+      "process_name": "[Not Found]",
+      "samples": 42
+    },
+    {
+      "final_used_memory_mib": 3006,
+      "gpu_uuid": "GPU-ee08c50e-bdff-b6c4-8009-9e3faad478c7",
+      "initial_used_memory_mib": 1912,
+      "max_memory_delta_mib": 1094,
+      "max_used_memory_mib": 3006,
+      "pid": 3491215,
+      "process_name": "[Not Found]",
+      "samples": 42
+    }
+  ],
+  "sample_count": 42
+}

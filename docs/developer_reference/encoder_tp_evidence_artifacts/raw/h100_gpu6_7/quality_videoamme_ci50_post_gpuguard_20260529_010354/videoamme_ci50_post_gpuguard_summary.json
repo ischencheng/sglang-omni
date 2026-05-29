@@ -1,0 +1,92 @@
+{
+  "artifact_root": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_gpuguard_20260529_010354",
+  "benchmark_name": "Video-AMME CI-50 post whole-GPU guard c4 rerun",
+  "checkpoint": "/data/qwen3omni",
+  "config": {
+    "asr_device": "cuda:0",
+    "base_url": "http://localhost:31543",
+    "enable_audio": false,
+    "lang": "en",
+    "max_concurrency": 4,
+    "max_samples": 50,
+    "max_tokens": 256,
+    "model": "qwen3-omni",
+    "repo_id": "zhaochenyang20/Video_AMME_ci",
+    "split": "test",
+    "temperature": 0.0,
+    "video_fps": 2.0,
+    "video_max_frames": 128,
+    "video_max_pixels": 401408,
+    "video_min_pixels": null,
+    "video_total_pixels": null,
+    "warmup": 0
+  },
+  "dataset": "zhaochenyang20/Video_AMME_ci",
+  "run": {
+    "accuracy": 0.72,
+    "admission_batch_sizes": {
+      "audio_encoder": {
+        "1": 50
+      },
+      "image_encoder": {
+        "1": 48,
+        "2": 1
+      }
+    },
+    "admission_defers": {
+      "image_encoder": {
+        "gpu_guard": 47
+      }
+    },
+    "admission_rejects": {},
+    "benchmark_command": "CUDA_VISIBLE_DEVICES=6,7 PYTHONPATH=/tmp/qwen_vl_utils_0011:/data/sglang-omni python -m benchmarks.eval.benchmark_omni_videoamme --model qwen3-omni --repo-id zhaochenyang20/Video_AMME_ci --max-samples 50 --max-concurrency 4 --video-fps 2 --video-max-frames 128 --video-max-pixels 401408 --max-tokens 256 --temperature 0.0 --timeout-s 500 --port 31543 --output-dir /data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_gpuguard_20260529_010354/pr_tp2_c4/results",
+    "completed_requests": 50,
+    "correct": 36,
+    "failed": 0,
+    "failed_requests": 0,
+    "latency_mean_s": 17.147,
+    "latency_p95_s": 19.431,
+    "name": "pr_tp2_c4_no_encoder_max_batch_size",
+    "prompt_tokens_mean": 14336.0,
+    "prompt_tokens_total": 716818,
+    "reservation_max_required_bytes": {
+      "audio_encoder": 5162338912,
+      "image_encoder": 5150605312
+    },
+    "reservation_min_free_bytes": {
+      "audio_encoder": 2894921728,
+      "image_encoder": 2894921728
+    },
+    "result_json": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_gpuguard_20260529_010354/pr_tp2_c4/results/videoamme_results.json",
+    "scheduler_configs": [
+      {
+        "activation_budget_bytes": 8589934592,
+        "max_batch_size": 32,
+        "stage": "image_encoder",
+        "tp_rank": "1/2"
+      },
+      {
+        "activation_budget_bytes": 8589934592,
+        "max_batch_size": 32,
+        "stage": "image_encoder",
+        "tp_rank": "0/2"
+      },
+      {
+        "activation_budget_bytes": 1073741824,
+        "max_batch_size": 32,
+        "stage": "audio_encoder",
+        "tp_rank": "0/2"
+      },
+      {
+        "activation_budget_bytes": 1073741824,
+        "max_batch_size": 32,
+        "stage": "audio_encoder",
+        "tp_rank": "1/2"
+      }
+    ],
+    "server_command": "CUDA_VISIBLE_DEVICES=6,7 PYTHONPATH=/tmp/qwen_vl_utils_0011:/data/sglang-omni SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 SGLANG_OMNI_ENCODER_TIMING_DETAIL=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python examples/qwen3_omni_encoder_tp.py --model /data/qwen3omni --encoder-backend sglang --image-tp 2 --audio-tp 2 --layout colocated-2gpu --host 0.0.0.0 --port 31543 --thinker-max-seq-len 32768 --thinker-mem-fraction-static 0.80 --talker-mem-fraction-static 0.12 --encoder-total-gpu-memory-fraction 0.01 --image-encoder-activation-budget-gib 8 --audio-encoder-activation-budget-gib 1",
+    "server_log": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_gpuguard_20260529_010354/pr_tp2_c4/server.log",
+    "throughput_qps": 0.227,
+    "total_samples": 50
+  }
+}

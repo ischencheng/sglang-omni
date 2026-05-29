@@ -1,0 +1,18 @@
+{
+  "audio_truncation": false,
+  "audios": [
+    "/data/encoder_tp_evidence_20260526/media/query_to_cars_3000s.wav"
+  ],
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Summarize the audio briefly.",
+      "role": "user"
+    }
+  ],
+  "modalities": [
+    "text"
+  ],
+  "model": "qwen3-omni",
+  "stream": false
+}

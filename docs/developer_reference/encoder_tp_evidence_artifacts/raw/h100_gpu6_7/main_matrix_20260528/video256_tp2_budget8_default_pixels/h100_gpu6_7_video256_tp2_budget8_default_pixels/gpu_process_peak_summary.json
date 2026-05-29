@@ -1,0 +1,75 @@
+{
+  "processes": [
+    {
+      "final_used_memory_mib": 8882,
+      "gpu_uuid": "GPU-6a051904-54a1-9fbc-ed92-1c8ea133e232",
+      "initial_used_memory_mib": 8882,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 8882,
+      "pid": 7884,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 942,
+      "gpu_uuid": "GPU-6a051904-54a1-9fbc-ed92-1c8ea133e232",
+      "initial_used_memory_mib": 942,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 942,
+      "pid": 8063,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 2098,
+      "gpu_uuid": "GPU-6a051904-54a1-9fbc-ed92-1c8ea133e232",
+      "initial_used_memory_mib": 2098,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 2098,
+      "pid": 8204,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 2518,
+      "gpu_uuid": "GPU-6a051904-54a1-9fbc-ed92-1c8ea133e232",
+      "initial_used_memory_mib": 2518,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 2518,
+      "pid": 8689,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 69892,
+      "gpu_uuid": "GPU-e9f60c1d-8856-043c-42cd-47a942a4d8f1",
+      "initial_used_memory_mib": 69892,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 69892,
+      "pid": 7434,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 3838,
+      "gpu_uuid": "GPU-e9f60c1d-8856-043c-42cd-47a942a4d8f1",
+      "initial_used_memory_mib": 2098,
+      "max_memory_delta_mib": 1740,
+      "max_used_memory_mib": 3838,
+      "pid": 8203,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    },
+    {
+      "final_used_memory_mib": 2518,
+      "gpu_uuid": "GPU-e9f60c1d-8856-043c-42cd-47a942a4d8f1",
+      "initial_used_memory_mib": 2518,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 2518,
+      "pid": 8688,
+      "process_name": "/usr/bin/python",
+      "samples": 37
+    }
+  ],
+  "sample_count": 37
+}

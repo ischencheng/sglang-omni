@@ -1,0 +1,55 @@
+{
+  "processes": [
+    {
+      "final_used_memory_mib": 7130,
+      "gpu_uuid": "GPU-973ab323-059a-16d1-6542-dd2662b76360",
+      "initial_used_memory_mib": 1832,
+      "max_memory_delta_mib": 5298,
+      "max_used_memory_mib": 7130,
+      "pid": 162422,
+      "process_name": "/usr/bin/python",
+      "samples": 25
+    },
+    {
+      "final_used_memory_mib": 1872,
+      "gpu_uuid": "GPU-973ab323-059a-16d1-6542-dd2662b76360",
+      "initial_used_memory_mib": 1872,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 1872,
+      "pid": 162591,
+      "process_name": "/usr/bin/python",
+      "samples": 25
+    },
+    {
+      "final_used_memory_mib": 65098,
+      "gpu_uuid": "GPU-973ab323-059a-16d1-6542-dd2662b76360",
+      "initial_used_memory_mib": 64192,
+      "max_memory_delta_mib": 906,
+      "max_used_memory_mib": 65098,
+      "pid": 162902,
+      "process_name": "/usr/bin/python",
+      "samples": 25
+    },
+    {
+      "final_used_memory_mib": 9180,
+      "gpu_uuid": "GPU-991e0141-8bcb-6f9c-7737-01063141cd23",
+      "initial_used_memory_mib": 9180,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 9180,
+      "pid": 163407,
+      "process_name": "/usr/bin/python",
+      "samples": 25
+    },
+    {
+      "final_used_memory_mib": 942,
+      "gpu_uuid": "GPU-991e0141-8bcb-6f9c-7737-01063141cd23",
+      "initial_used_memory_mib": 942,
+      "max_memory_delta_mib": 0,
+      "max_used_memory_mib": 942,
+      "pid": 163585,
+      "process_name": "/usr/bin/python",
+      "samples": 25
+    }
+  ],
+  "sample_count": 25
+}

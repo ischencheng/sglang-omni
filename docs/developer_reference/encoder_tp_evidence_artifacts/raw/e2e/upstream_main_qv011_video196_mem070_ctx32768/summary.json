@@ -1,0 +1,14 @@
+{
+  "case_id": "upstream_main_qv011_video196_mem070_ctx32768",
+  "failures": 1,
+  "health_after_ok": true,
+  "health_before_ok": true,
+  "latency_s_max": null,
+  "latency_s_mean": null,
+  "latency_s_p50": null,
+  "latency_s_stdev": null,
+  "measured_runs": 1,
+  "output_dir": "/data/encoder_tp_evidence_20260526/e2e/upstream_main_qv011_video196_mem070_ctx32768",
+  "successes": 0,
+  "total_runs": 1
+}

@@ -1,0 +1,1126 @@
+{
+  "artifact_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529",
+  "capacity": {
+    "max_success_frame_cap_by_tp": {
+      "1": 1024,
+      "4": 1024
+    },
+    "success_frame_caps_by_tp": {
+      "1": [
+        128,
+        256,
+        512,
+        768,
+        1024
+      ],
+      "4": [
+        128,
+        256,
+        512,
+        768,
+        1024
+      ]
+    },
+    "tp1_max_success_frame_cap": 1024,
+    "tp2_max_success_frame_cap": null
+  },
+  "comparisons_to_tp1": {
+    "4": {
+      "crossover_frame_cap": -913.2732012918796,
+      "slope_conclusion": "b4_lt_b1",
+      "tp1_b_mib_per_frame": 8.356421493902438,
+      "tp4_b_mib_per_frame": 5.9079649390243905
+    }
+  },
+  "fit": {
+    "crossover_frame_cap": null,
+    "slope_conclusion": "insufficient_success_points",
+    "tp1_peak": {
+      "A_mib": 10781.987804878048,
+      "b_mib_per_frame": 8.356421493902438,
+      "n": 5,
+      "r2": 0.6547794683932995
+    },
+    "tp2_max_rank_peak": null,
+    "tp2_sum_peak_reference_only": null
+  },
+  "fit_frames": [
+    128,
+    256,
+    512,
+    768,
+    1024
+  ],
+  "fits_by_tp": {
+    "1": {
+      "fit_frames": [
+        128,
+        256,
+        512,
+        768,
+        1024
+      ],
+      "max_rank_peak_by_1k_premerge_tokens": {
+        "A_mib": 2186.596069869028,
+        "b_mib_per_frame": 45.51659019059305,
+        "n": 5,
+        "r2": 0.9999721618629945
+      },
+      "max_rank_peak_by_frame": {
+        "A_mib": 10781.987804878048,
+        "b_mib_per_frame": 8.356421493902438,
+        "n": 5,
+        "r2": 0.6547794683932995
+      },
+      "sum_rank_peak_by_frame_reference_only": {
+        "A_mib": 10781.987804878048,
+        "b_mib_per_frame": 8.356421493902438,
+        "n": 5,
+        "r2": 0.6547794683932995
+      }
+    },
+    "4": {
+      "fit_frames": [
+        128,
+        256,
+        512,
+        768,
+        1024
+      ],
+      "max_rank_peak_by_1k_premerge_tokens": {
+        "A_mib": 2447.834061135366,
+        "b_mib_per_frame": 32.2535707787482,
+        "n": 5,
+        "r2": 0.9999911380348673
+      },
+      "max_rank_peak_by_frame": {
+        "A_mib": 8545.878048780487,
+        "b_mib_per_frame": 5.9079649390243905,
+        "n": 5,
+        "r2": 0.6518118832074856
+      },
+      "sum_rank_peak_by_frame_reference_only": {
+        "A_mib": 34171.80487804878,
+        "b_mib_per_frame": 23.608993902439025,
+        "n": 5,
+        "r2": 0.6524958848181789
+      }
+    }
+  },
+  "frame_caps_requested": [
+    128,
+    256,
+    512,
+    768,
+    1024
+  ],
+  "model_path": "/data/qwen3omni",
+  "notes": [
+    "encoder-only image/video forward; no thinker/talker/generation",
+    "fresh subprocesses per TP/frame point",
+    "no video_max_pixels override set by this probe",
+    "activation budget disabled; measurement-only GPU guard allowed all candidates",
+    "encoder_max_batch_size forced to 1"
+  ],
+  "rows": [
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp1_frames128",
+      "elapsed_s": 12.070616286247969,
+      "failure_type": null,
+      "frame_cap": 128,
+      "max_rank_peak_mib": 8910,
+      "rank_rows": [
+        {
+          "after_load_mib": 1892,
+          "delta_mib": 7018,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 75497472,
+              "shape": [
+                36864,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 8910,
+          "physical_gpu_id": 1,
+          "pid": 199282,
+          "rank": 0,
+          "torch_max_allocated_mib": 7372,
+          "torch_max_reserved_mib": 8224
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 8910,
+      "tp_size": 1,
+      "visual_tokens_pre_merge": 147456
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames128",
+      "elapsed_s": 23.240992369130254,
+      "failure_type": null,
+      "frame_cap": 128,
+      "max_rank_peak_mib": 7206,
+      "rank_rows": [
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 5400,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 75497472,
+                "shape": [
+                  36864,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 75497472,
+              "shape": [
+                36864,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 7206,
+          "physical_gpu_id": 1,
+          "pid": 199716,
+          "rank": 0,
+          "torch_max_allocated_mib": 4657,
+          "torch_max_reserved_mib": 5122
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 5400,
+          "output": null,
+          "peak_mib": 7206,
+          "physical_gpu_id": 3,
+          "pid": 199717,
+          "rank": 1,
+          "torch_max_allocated_mib": 4657,
+          "torch_max_reserved_mib": 5122
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 5400,
+          "output": null,
+          "peak_mib": 7206,
+          "physical_gpu_id": 4,
+          "pid": 199718,
+          "rank": 2,
+          "torch_max_allocated_mib": 4657,
+          "torch_max_reserved_mib": 5122
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 5400,
+          "output": null,
+          "peak_mib": 7206,
+          "physical_gpu_id": 5,
+          "pid": 199719,
+          "rank": 3,
+          "torch_max_allocated_mib": 4657,
+          "torch_max_reserved_mib": 5122
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 28824,
+      "tp_size": 4,
+      "visual_tokens_pre_merge": 147456
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp1_frames256",
+      "elapsed_s": 13.097894840873778,
+      "failure_type": null,
+      "frame_cap": 256,
+      "max_rank_peak_mib": 15590,
+      "rank_rows": [
+        {
+          "after_load_mib": 1892,
+          "delta_mib": 13698,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 150994944,
+              "shape": [
+                73728,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 15590,
+          "physical_gpu_id": 1,
+          "pid": 201444,
+          "rank": 0,
+          "torch_max_allocated_mib": 13506,
+          "torch_max_reserved_mib": 14904
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 15590,
+      "tp_size": 1,
+      "visual_tokens_pre_merge": 294912
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames256",
+      "elapsed_s": 28.384305289015174,
+      "failure_type": null,
+      "frame_cap": 256,
+      "max_rank_peak_mib": 11966,
+      "rank_rows": [
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10160,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 150994944,
+                "shape": [
+                  73728,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 150994944,
+              "shape": [
+                73728,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 11966,
+          "physical_gpu_id": 1,
+          "pid": 201909,
+          "rank": 0,
+          "torch_max_allocated_mib": 8975,
+          "torch_max_reserved_mib": 9882
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10140,
+          "output": null,
+          "peak_mib": 11946,
+          "physical_gpu_id": 3,
+          "pid": 201910,
+          "rank": 1,
+          "torch_max_allocated_mib": 8975,
+          "torch_max_reserved_mib": 9862
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10140,
+          "output": null,
+          "peak_mib": 11946,
+          "physical_gpu_id": 4,
+          "pid": 201911,
+          "rank": 2,
+          "torch_max_allocated_mib": 8975,
+          "torch_max_reserved_mib": 9862
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10140,
+          "output": null,
+          "peak_mib": 11946,
+          "physical_gpu_id": 5,
+          "pid": 201912,
+          "rank": 3,
+          "torch_max_allocated_mib": 8975,
+          "torch_max_reserved_mib": 9862
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 47804,
+      "tp_size": 4,
+      "visual_tokens_pre_merge": 294912
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp1_frames512",
+      "elapsed_s": 13.105639475863427,
+      "failure_type": null,
+      "frame_cap": 512,
+      "max_rank_peak_mib": 16730,
+      "rank_rows": [
+        {
+          "after_load_mib": 1892,
+          "delta_mib": 14838,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 163577856,
+              "shape": [
+                79872,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 16730,
+          "physical_gpu_id": 1,
+          "pid": 203677,
+          "rank": 0,
+          "torch_max_allocated_mib": 14528,
+          "torch_max_reserved_mib": 16044
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 16730,
+      "tp_size": 1,
+      "visual_tokens_pre_merge": 319488
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512",
+      "elapsed_s": 29.388177251908928,
+      "failure_type": null,
+      "frame_cap": 512,
+      "max_rank_peak_mib": 12746,
+      "rank_rows": [
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10940,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 163577856,
+                "shape": [
+                  79872,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 163577856,
+              "shape": [
+                79872,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 12746,
+          "physical_gpu_id": 1,
+          "pid": 204118,
+          "rank": 0,
+          "torch_max_allocated_mib": 9695,
+          "torch_max_reserved_mib": 10662
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10940,
+          "output": null,
+          "peak_mib": 12746,
+          "physical_gpu_id": 3,
+          "pid": 204119,
+          "rank": 1,
+          "torch_max_allocated_mib": 9695,
+          "torch_max_reserved_mib": 10662
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10940,
+          "output": null,
+          "peak_mib": 12746,
+          "physical_gpu_id": 4,
+          "pid": 204120,
+          "rank": 2,
+          "torch_max_allocated_mib": 9695,
+          "torch_max_reserved_mib": 10662
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10940,
+          "output": null,
+          "peak_mib": 12746,
+          "physical_gpu_id": 5,
+          "pid": 204121,
+          "rank": 3,
+          "torch_max_allocated_mib": 9695,
+          "torch_max_reserved_mib": 10662
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 50984,
+      "tp_size": 4,
+      "visual_tokens_pre_merge": 319488
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp1_frames768",
+      "elapsed_s": 13.105647272896022,
+      "failure_type": null,
+      "frame_cap": 768,
+      "max_rank_peak_mib": 16150,
+      "rank_rows": [
+        {
+          "after_load_mib": 1892,
+          "delta_mib": 14258,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 157286400,
+              "shape": [
+                76800,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 16150,
+          "physical_gpu_id": 1,
+          "pid": 205939,
+          "rank": 0,
+          "torch_max_allocated_mib": 14017,
+          "torch_max_reserved_mib": 15464
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 16150,
+      "tp_size": 1,
+      "visual_tokens_pre_merge": 307200
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames768",
+      "elapsed_s": 29.38468096125871,
+      "failure_type": null,
+      "frame_cap": 768,
+      "max_rank_peak_mib": 12346,
+      "rank_rows": [
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10540,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 157286400,
+                "shape": [
+                  76800,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 157286400,
+              "shape": [
+                76800,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 12346,
+          "physical_gpu_id": 1,
+          "pid": 206381,
+          "rank": 0,
+          "torch_max_allocated_mib": 9335,
+          "torch_max_reserved_mib": 10262
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10540,
+          "output": null,
+          "peak_mib": 12346,
+          "physical_gpu_id": 3,
+          "pid": 206382,
+          "rank": 1,
+          "torch_max_allocated_mib": 9335,
+          "torch_max_reserved_mib": 10262
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10540,
+          "output": null,
+          "peak_mib": 12346,
+          "physical_gpu_id": 4,
+          "pid": 206383,
+          "rank": 2,
+          "torch_max_allocated_mib": 9335,
+          "torch_max_reserved_mib": 10262
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 10540,
+          "output": null,
+          "peak_mib": 12346,
+          "physical_gpu_id": 5,
+          "pid": 206384,
+          "rank": 3,
+          "torch_max_allocated_mib": 9335,
+          "torch_max_reserved_mib": 10262
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 49384,
+      "tp_size": 4,
+      "visual_tokens_pre_merge": 307200
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp1_frames1024",
+      "elapsed_s": 13.616681508719921,
+      "failure_type": null,
+      "frame_cap": 1024,
+      "max_rank_peak_mib": 18992,
+      "rank_rows": [
+        {
+          "after_load_mib": 1892,
+          "delta_mib": 17100,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 188743680,
+              "shape": [
+                92160,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 18992,
+          "physical_gpu_id": 1,
+          "pid": 208659,
+          "rank": 0,
+          "torch_max_allocated_mib": 16573,
+          "torch_max_reserved_mib": 18306
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 18992,
+      "tp_size": 1,
+      "visual_tokens_pre_merge": 368640
+    },
+    {
+      "actual_grid_rows": 1,
+      "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames1024",
+      "elapsed_s": 29.93096152599901,
+      "failure_type": null,
+      "frame_cap": 1024,
+      "max_rank_peak_mib": 14346,
+      "rank_rows": [
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 12540,
+          "output": {
+            "deepstack_visual_embeds_video": [
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              },
+              {
+                "device": "cuda:0",
+                "dtype": "torch.float16",
+                "numel": 188743680,
+                "shape": [
+                  92160,
+                  2048
+                ]
+              }
+            ],
+            "video_embeds": {
+              "device": "cuda:0",
+              "dtype": "torch.float16",
+              "numel": 188743680,
+              "shape": [
+                92160,
+                2048
+              ]
+            },
+            "video_grid_thw": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 3,
+              "shape": [
+                1,
+                3
+              ]
+            },
+            "video_token_counts": {
+              "device": "cuda:0",
+              "dtype": "torch.int64",
+              "numel": 1,
+              "shape": [
+                1
+              ]
+            }
+          },
+          "peak_mib": 14346,
+          "physical_gpu_id": 1,
+          "pid": 209101,
+          "rank": 0,
+          "torch_max_allocated_mib": 11134,
+          "torch_max_reserved_mib": 12262
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 12520,
+          "output": null,
+          "peak_mib": 14326,
+          "physical_gpu_id": 3,
+          "pid": 209102,
+          "rank": 1,
+          "torch_max_allocated_mib": 11134,
+          "torch_max_reserved_mib": 12242
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 12520,
+          "output": null,
+          "peak_mib": 14326,
+          "physical_gpu_id": 4,
+          "pid": 209104,
+          "rank": 2,
+          "torch_max_allocated_mib": 11134,
+          "torch_max_reserved_mib": 12242
+        },
+        {
+          "after_load_mib": 1806,
+          "delta_mib": 12520,
+          "output": null,
+          "peak_mib": 14326,
+          "physical_gpu_id": 5,
+          "pid": 209105,
+          "rank": 3,
+          "torch_max_allocated_mib": 11134,
+          "torch_max_reserved_mib": 12242
+        }
+      ],
+      "success": true,
+      "sum_rank_peak_mib": 57324,
+      "tp_size": 4,
+      "visual_tokens_pre_merge": 368640
+    }
+  ],
+  "tp1_gpu": 6,
+  "tp2_gpus": [
+    6,
+    7
+  ],
+  "tp_specs": [
+    {
+      "gpu_ids": [
+        1
+      ],
+      "tp_size": 1
+    },
+    {
+      "gpu_ids": [
+        1,
+        3,
+        4,
+        5
+      ],
+      "tp_size": 4
+    }
+  ],
+  "video": "/data/encoder_tp_evidence_20260526/media/draw_loop_2048frames.mp4",
+  "video_fps": 30.0
+}

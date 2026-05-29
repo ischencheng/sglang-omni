@@ -1,0 +1,820 @@
+{
+  "admission_budget": null,
+  "case_dir": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512",
+  "elapsed_s": 29.388177251908928,
+  "failure_type": null,
+  "forced_encoder_max_batch_size": 1,
+  "frame_cap": 512,
+  "gpu_guard": "measurement_only_allow_all",
+  "gpu_ids": [
+    1,
+    3,
+    4,
+    5
+  ],
+  "log_paths": [
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank0.log",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank1.log",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank2.log",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank3.log"
+  ],
+  "nccl_port": 51883,
+  "pids": [
+    204118,
+    204119,
+    204120,
+    204121
+  ],
+  "preprocess": {
+    "actual_grid_rows": 1,
+    "frame_cap": 512,
+    "input_path": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/preprocess/preprocessed_video_512.pkl",
+    "input_tensor_bytes": 1962934300,
+    "preprocess_elapsed_s": 33.43775001121685,
+    "tensors": {
+      "pixel_values_videos": {
+        "bytes": 1962934272,
+        "dtype": "torch.float32",
+        "shape": [
+          319488,
+          1536
+        ]
+      },
+      "video_grid_thw": {
+        "bytes": 24,
+        "dtype": "torch.int64",
+        "shape": [
+          1,
+          3
+        ]
+      },
+      "video_second_per_grid": {
+        "bytes": 4,
+        "dtype": "torch.float32",
+        "shape": [
+          1
+        ]
+      }
+    },
+    "video": "/data/encoder_tp_evidence_20260526/media/draw_loop_2048frames.mp4",
+    "video_fps": 30.0,
+    "video_grid_thw": [
+      [
+        256,
+        26,
+        48
+      ]
+    ],
+    "video_max_pixels_override": null,
+    "visual_tokens": null,
+    "visual_tokens_pre_merge": 319488
+  },
+  "rank_results": [
+    {
+      "after_load_allocated_bytes": 330252288,
+      "after_load_nvml_process_bytes": 1893728256,
+      "after_load_reserved_bytes": 333447168,
+      "elapsed_s": 18.486932893749326,
+      "final_nvml_process_bytes": 13365149696,
+      "frame_cap": 512,
+      "input_path": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/preprocess/preprocessed_video_512.pkl",
+      "max_mark_nvml_process_bytes": 13365149696,
+      "memory_marks": [
+        {
+          "allocated_bytes": 330252288,
+          "batch_size": 1,
+          "free_bytes": 83114328064,
+          "mark": "after_inbox_admission",
+          "max_allocated_bytes": 330252288,
+          "max_reserved_bytes": 333447168,
+          "nvml_process_bytes": 1893728256,
+          "raw": "2026-05-29 18:33:53,685 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_inbox_admission batch_size=1 allocated_bytes=330252288 reserved_bytes=333447168 max_allocated_bytes=330252288 max_reserved_bytes=333447168 free_bytes=83114328064 total_bytes=85017493504 nvml_process_bytes=1893728256",
+          "reserved_bytes": 333447168,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 2294467584,
+          "batch_size": 1,
+          "free_bytes": 81140908032,
+          "mark": "after_strip_h2d",
+          "max_allocated_bytes": 2294467584,
+          "max_reserved_bytes": 2306867200,
+          "nvml_process_bytes": 3867148288,
+          "raw": "2026-05-29 18:33:53,881 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_strip_h2d batch_size=1 allocated_bytes=2294467584 reserved_bytes=2306867200 max_allocated_bytes=2294467584 max_reserved_bytes=2306867200 free_bytes=81140908032 total_bytes=85017493504 nvml_process_bytes=3867148288",
+          "reserved_bytes": 2306867200,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 2294467584,
+          "batch_size": 1,
+          "free_bytes": 81140908032,
+          "mark": "after_metadata_broadcast",
+          "max_allocated_bytes": 2294468608,
+          "max_reserved_bytes": 2306867200,
+          "nvml_process_bytes": 3867148288,
+          "raw": "2026-05-29 18:33:57,513 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_metadata_broadcast batch_size=1 allocated_bytes=2294467584 reserved_bytes=2306867200 max_allocated_bytes=2294468608 max_reserved_bytes=2306867200 free_bytes=81140908032 total_bytes=85017493504 nvml_process_bytes=3867148288",
+          "reserved_bytes": 2306867200,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 2294467584,
+          "batch_size": 1,
+          "free_bytes": 81140908032,
+          "mark": "after_allocation_handshake",
+          "max_allocated_bytes": 2294468608,
+          "max_reserved_bytes": 2306867200,
+          "nvml_process_bytes": 3867148288,
+          "raw": "2026-05-29 18:34:01,859 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_allocation_handshake batch_size=1 allocated_bytes=2294467584 reserved_bytes=2306867200 max_allocated_bytes=2294468608 max_reserved_bytes=2306867200 free_bytes=81140908032 total_bytes=85017493504 nvml_process_bytes=3867148288",
+          "reserved_bytes": 2306867200,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 2294467584,
+          "batch_size": 1,
+          "free_bytes": 80595648512,
+          "mark": "after_tensor_broadcast",
+          "max_allocated_bytes": 2294468608,
+          "max_reserved_bytes": 2306867200,
+          "nvml_process_bytes": 4412407808,
+          "raw": "2026-05-29 18:34:02,426 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_tensor_broadcast batch_size=1 allocated_bytes=2294467584 reserved_bytes=2306867200 max_allocated_bytes=2294468608 max_reserved_bytes=2306867200 free_bytes=80595648512 total_bytes=85017493504 nvml_process_bytes=4412407808",
+          "reserved_bytes": 2306867200,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 2294467584,
+          "batch_size": 1,
+          "free_bytes": 80595648512,
+          "mark": "after_build_before_forward",
+          "max_allocated_bytes": 2294468608,
+          "max_reserved_bytes": 2306867200,
+          "nvml_process_bytes": 4412407808,
+          "raw": "2026-05-29 18:34:02,433 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_build_before_forward batch_size=1 allocated_bytes=2294467584 reserved_bytes=2306867200 max_allocated_bytes=2294468608 max_reserved_bytes=2306867200 free_bytes=80595648512 total_bytes=85017493504 nvml_process_bytes=4412407808",
+          "reserved_bytes": 2306867200,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71642906624,
+          "mark": "after_forward",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,224 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_forward batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71642906624 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 3627074560,
+          "batch_size": 1,
+          "free_bytes": 71642906624,
+          "mark": "after_slice_output_staging",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,227 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_slice_output_staging batch_size=1 allocated_bytes=3627074560 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71642906624 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        },
+        {
+          "allocated_bytes": 3627074560,
+          "batch_size": 1,
+          "free_bytes": 71642906624,
+          "mark": "after_cleanup_synchronize",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,228 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=0/4 mark=after_cleanup_synchronize batch_size=1 allocated_bytes=3627074560 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71642906624 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "0/4"
+        }
+      ],
+      "message_count": 1,
+      "output_summary": {
+        "deepstack_visual_embeds_video": [
+          {
+            "device": "cuda:0",
+            "dtype": "torch.float16",
+            "numel": 163577856,
+            "shape": [
+              79872,
+              2048
+            ]
+          },
+          {
+            "device": "cuda:0",
+            "dtype": "torch.float16",
+            "numel": 163577856,
+            "shape": [
+              79872,
+              2048
+            ]
+          },
+          {
+            "device": "cuda:0",
+            "dtype": "torch.float16",
+            "numel": 163577856,
+            "shape": [
+              79872,
+              2048
+            ]
+          }
+        ],
+        "video_embeds": {
+          "device": "cuda:0",
+          "dtype": "torch.float16",
+          "numel": 163577856,
+          "shape": [
+            79872,
+            2048
+          ]
+        },
+        "video_grid_thw": {
+          "device": "cuda:0",
+          "dtype": "torch.int64",
+          "numel": 3,
+          "shape": [
+            1,
+            3
+          ]
+        },
+        "video_token_counts": {
+          "device": "cuda:0",
+          "dtype": "torch.int64",
+          "numel": 1,
+          "shape": [
+            1
+          ]
+        }
+      },
+      "physical_gpu_id": 1,
+      "pid": 204118,
+      "rank": 0,
+      "success": true,
+      "timing": [
+        {
+          "allocation_handshake_ms": 4344.688,
+          "batch_size": 1,
+          "build_ms": 1.188,
+          "d_ms": 181.601,
+          "follower_allocation_ms": 0.0,
+          "forward_ms": 1786.623,
+          "inbox_admission_ms": 0.336,
+          "metadata_broadcast_ms": 3629.77,
+          "rank_arrival_skew_ms": 1.08,
+          "rank_wait_skew_ms": 2.177,
+          "raw": "2026-05-29 18:34:04,227 INFO root:1115 encoder_batch_timing stage=image_encoder tp_rank=0/4 batch_size=1 recv_ms=8744.229 inbox_admission_ms=0.336 strip_h2d_ms=181.601 metadata_broadcast_ms=3629.770 follower_allocation_ms=0.000 allocation_handshake_ms=4344.688 tensor_broadcast_ms=564.914 rank_wait_skew_ms=2.177 rank_arrival_skew_ms=1.080 build_ms=1.188 forward_ms=1786.623 slice_ms=0.356 total_ms=10543.265",
+          "recv_ms": 8744.229,
+          "slice_ms": 0.356,
+          "stage": "image_encoder",
+          "tensor_broadcast_ms": 564.914,
+          "total_ms": 10543.265,
+          "tp_rank": "0/4"
+        }
+      ],
+      "torch_max_memory_allocated_bytes": 10165078016,
+      "torch_max_memory_reserved_bytes": 11179917312,
+      "torch_mem_get_info": {
+        "free_bytes": 71642906624,
+        "total_bytes": 85017493504
+      },
+      "torch_memory_allocated_bytes": 3627074560,
+      "torch_memory_reserved_bytes": 11179917312,
+      "tp_size": 4
+    },
+    {
+      "after_load_allocated_bytes": 319632896,
+      "after_load_nvml_process_bytes": 1893728256,
+      "after_load_reserved_bytes": 333447168,
+      "elapsed_s": 17.60762688331306,
+      "final_nvml_process_bytes": 13365149696,
+      "frame_cap": 512,
+      "input_path": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/preprocess/preprocessed_video_512.pkl",
+      "max_mark_nvml_process_bytes": 13365149696,
+      "memory_marks": [
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 81155588096,
+          "mark": "after_metadata_broadcast",
+          "max_allocated_bytes": 2283848192,
+          "max_reserved_bytes": 2285895680,
+          "nvml_process_bytes": 3846176768,
+          "raw": "2026-05-29 18:34:01,848 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_metadata_broadcast batch_size=1 allocated_bytes=2283848192 reserved_bytes=2285895680 max_allocated_bytes=2283848192 max_reserved_bytes=2285895680 free_bytes=81155588096 total_bytes=85017493504 nvml_process_bytes=3846176768",
+          "reserved_bytes": 2285895680,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79182168064,
+          "mark": "after_follower_allocation",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:01,856 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_follower_allocation batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79182168064 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79182168064,
+          "mark": "after_allocation_handshake",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:01,859 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_allocation_handshake batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79182168064 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 78636908544,
+          "mark": "after_tensor_broadcast",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,427 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_tensor_broadcast batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78636908544 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 78636908544,
+          "mark": "after_build_before_forward",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,432 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_build_before_forward batch_size=1 allocated_bytes=2283848192 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78636908544 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71636615168,
+          "mark": "after_forward",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,224 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_forward batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71636615168 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71636615168,
+          "mark": "after_cleanup_synchronize",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,225 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=1/4 mark=after_cleanup_synchronize batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71636615168 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "1/4"
+        }
+      ],
+      "message_count": 1,
+      "output_summary": null,
+      "physical_gpu_id": 3,
+      "pid": 204119,
+      "rank": 1,
+      "success": true,
+      "timing": [
+        {
+          "allocation_handshake_ms": 1.67,
+          "batch_size": 1,
+          "build_ms": 1.495,
+          "d_ms": 0.0,
+          "follower_allocation_ms": 6.647,
+          "forward_ms": 1787.393,
+          "inbox_admission_ms": 0.0,
+          "metadata_broadcast_ms": 8143.076,
+          "rank_arrival_skew_ms": 1.08,
+          "rank_wait_skew_ms": 1.127,
+          "raw": "2026-05-29 18:34:04,224 INFO root:1115 encoder_batch_timing stage=image_encoder tp_rank=1/4 batch_size=1 recv_ms=8725.021 inbox_admission_ms=0.000 strip_h2d_ms=0.000 metadata_broadcast_ms=8143.076 follower_allocation_ms=6.647 allocation_handshake_ms=1.670 tensor_broadcast_ms=565.953 rank_wait_skew_ms=1.127 rank_arrival_skew_ms=1.080 build_ms=1.495 forward_ms=1787.393 slice_ms=0.000 total_ms=10520.427",
+          "recv_ms": 8725.021,
+          "slice_ms": 0.0,
+          "stage": "image_encoder",
+          "tensor_broadcast_ms": 565.953,
+          "total_ms": 10520.427,
+          "tp_rank": "1/4"
+        }
+      ],
+      "torch_max_memory_allocated_bytes": 10165078016,
+      "torch_max_memory_reserved_bytes": 11179917312,
+      "torch_mem_get_info": {
+        "free_bytes": 71636615168,
+        "total_bytes": 85017493504
+      },
+      "torch_memory_allocated_bytes": 3627074048,
+      "torch_memory_reserved_bytes": 11179917312,
+      "tp_size": 4
+    },
+    {
+      "after_load_allocated_bytes": 319632896,
+      "after_load_nvml_process_bytes": 1893728256,
+      "after_load_reserved_bytes": 333447168,
+      "elapsed_s": 17.60881109489128,
+      "final_nvml_process_bytes": 13365149696,
+      "frame_cap": 512,
+      "input_path": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/preprocess/preprocessed_video_512.pkl",
+      "max_mark_nvml_process_bytes": 13365149696,
+      "memory_marks": [
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 81159913472,
+          "mark": "after_metadata_broadcast",
+          "max_allocated_bytes": 2283848192,
+          "max_reserved_bytes": 2285895680,
+          "nvml_process_bytes": 3846176768,
+          "raw": "2026-05-29 18:34:00,929 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_metadata_broadcast batch_size=1 allocated_bytes=2283848192 reserved_bytes=2285895680 max_allocated_bytes=2283848192 max_reserved_bytes=2285895680 free_bytes=81159913472 total_bytes=85017493504 nvml_process_bytes=3846176768",
+          "reserved_bytes": 2285895680,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79186493440,
+          "mark": "after_follower_allocation",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:00,937 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_follower_allocation batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79186493440 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79186493440,
+          "mark": "after_allocation_handshake",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:01,859 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_allocation_handshake batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79186493440 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 78641233920,
+          "mark": "after_tensor_broadcast",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,427 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_tensor_broadcast batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78641233920 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 78641233920,
+          "mark": "after_build_before_forward",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,432 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_build_before_forward batch_size=1 allocated_bytes=2283848192 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78641233920 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71640940544,
+          "mark": "after_forward",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,224 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_forward batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71640940544 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71640940544,
+          "mark": "after_cleanup_synchronize",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,226 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=2/4 mark=after_cleanup_synchronize batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71640940544 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "2/4"
+        }
+      ],
+      "message_count": 1,
+      "output_summary": null,
+      "physical_gpu_id": 4,
+      "pid": 204120,
+      "rank": 2,
+      "success": true,
+      "timing": [
+        {
+          "allocation_handshake_ms": 920.619,
+          "batch_size": 1,
+          "build_ms": 1.51,
+          "d_ms": 0.0,
+          "follower_allocation_ms": 6.449,
+          "forward_ms": 1787.566,
+          "inbox_admission_ms": 0.0,
+          "metadata_broadcast_ms": 7262.333,
+          "rank_arrival_skew_ms": 1.08,
+          "rank_wait_skew_ms": 1.42,
+          "raw": "2026-05-29 18:34:04,224 INFO root:1115 encoder_batch_timing stage=image_encoder tp_rank=2/4 batch_size=1 recv_ms=8762.988 inbox_admission_ms=0.000 strip_h2d_ms=0.000 metadata_broadcast_ms=7262.333 follower_allocation_ms=6.449 allocation_handshake_ms=920.619 tensor_broadcast_ms=564.791 rank_wait_skew_ms=1.420 rank_arrival_skew_ms=1.080 build_ms=1.510 forward_ms=1787.566 slice_ms=0.000 total_ms=10558.777",
+          "recv_ms": 8762.988,
+          "slice_ms": 0.0,
+          "stage": "image_encoder",
+          "tensor_broadcast_ms": 564.791,
+          "total_ms": 10558.777,
+          "tp_rank": "2/4"
+        }
+      ],
+      "torch_max_memory_allocated_bytes": 10165078016,
+      "torch_max_memory_reserved_bytes": 11179917312,
+      "torch_mem_get_info": {
+        "free_bytes": 71640940544,
+        "total_bytes": 85017493504
+      },
+      "torch_memory_allocated_bytes": 3627074048,
+      "torch_memory_reserved_bytes": 11179917312,
+      "tp_size": 4
+    },
+    {
+      "after_load_allocated_bytes": 319632896,
+      "after_load_nvml_process_bytes": 1893728256,
+      "after_load_reserved_bytes": 333447168,
+      "elapsed_s": 17.73588906088844,
+      "final_nvml_process_bytes": 13365149696,
+      "frame_cap": 512,
+      "input_path": "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/preprocess/preprocessed_video_512.pkl",
+      "max_mark_nvml_process_bytes": 13365149696,
+      "memory_marks": [
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 81162010624,
+          "mark": "after_metadata_broadcast",
+          "max_allocated_bytes": 2283848192,
+          "max_reserved_bytes": 2285895680,
+          "nvml_process_bytes": 3846176768,
+          "raw": "2026-05-29 18:34:01,485 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_metadata_broadcast batch_size=1 allocated_bytes=2283848192 reserved_bytes=2285895680 max_allocated_bytes=2283848192 max_reserved_bytes=2285895680 free_bytes=81162010624 total_bytes=85017493504 nvml_process_bytes=3846176768",
+          "reserved_bytes": 2285895680,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79188590592,
+          "mark": "after_follower_allocation",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:01,493 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_follower_allocation batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79188590592 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 79188590592,
+          "mark": "after_allocation_handshake",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 5819596800,
+          "raw": "2026-05-29 18:34:01,859 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_allocation_handshake batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=79188590592 total_bytes=85017493504 nvml_process_bytes=5819596800",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 4248063488,
+          "batch_size": 1,
+          "free_bytes": 78643331072,
+          "mark": "after_tensor_broadcast",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,426 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_tensor_broadcast batch_size=1 allocated_bytes=4248063488 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78643331072 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 2283848192,
+          "batch_size": 1,
+          "free_bytes": 78643331072,
+          "mark": "after_build_before_forward",
+          "max_allocated_bytes": 4248063488,
+          "max_reserved_bytes": 4259315712,
+          "nvml_process_bytes": 6364856320,
+          "raw": "2026-05-29 18:34:02,432 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_build_before_forward batch_size=1 allocated_bytes=2283848192 reserved_bytes=4259315712 max_allocated_bytes=4248063488 max_reserved_bytes=4259315712 free_bytes=78643331072 total_bytes=85017493504 nvml_process_bytes=6364856320",
+          "reserved_bytes": 4259315712,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71643037696,
+          "mark": "after_forward",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,224 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_forward batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71643037696 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        },
+        {
+          "allocated_bytes": 3627074048,
+          "batch_size": 1,
+          "free_bytes": 71643037696,
+          "mark": "after_cleanup_synchronize",
+          "max_allocated_bytes": 10165078016,
+          "max_reserved_bytes": 11179917312,
+          "nvml_process_bytes": 13365149696,
+          "raw": "2026-05-29 18:34:04,225 INFO sglang_omni.scheduling.encoder_scheduler:701 encoder_memory_mark stage=image_encoder tp_rank=3/4 mark=after_cleanup_synchronize batch_size=1 allocated_bytes=3627074048 reserved_bytes=11179917312 max_allocated_bytes=10165078016 max_reserved_bytes=11179917312 free_bytes=71643037696 total_bytes=85017493504 nvml_process_bytes=13365149696",
+          "reserved_bytes": 11179917312,
+          "stage": "image_encoder",
+          "total_bytes": 85017493504,
+          "tp_rank": "3/4"
+        }
+      ],
+      "message_count": 1,
+      "output_summary": null,
+      "physical_gpu_id": 5,
+      "pid": 204121,
+      "rank": 3,
+      "success": true,
+      "timing": [
+        {
+          "allocation_handshake_ms": 364.684,
+          "batch_size": 1,
+          "build_ms": 1.476,
+          "d_ms": 0.0,
+          "follower_allocation_ms": 6.613,
+          "forward_ms": 1787.665,
+          "inbox_admission_ms": 0.0,
+          "metadata_broadcast_ms": 7784.669,
+          "rank_arrival_skew_ms": 1.08,
+          "rank_wait_skew_ms": 1.835,
+          "raw": "2026-05-29 18:34:04,224 INFO root:1115 encoder_batch_timing stage=image_encoder tp_rank=3/4 batch_size=1 recv_ms=8729.219 inbox_admission_ms=0.000 strip_h2d_ms=0.000 metadata_broadcast_ms=7784.669 follower_allocation_ms=6.613 allocation_handshake_ms=364.684 tensor_broadcast_ms=564.757 rank_wait_skew_ms=1.835 rank_arrival_skew_ms=1.080 build_ms=1.476 forward_ms=1787.665 slice_ms=0.000 total_ms=10524.845",
+          "recv_ms": 8729.219,
+          "slice_ms": 0.0,
+          "stage": "image_encoder",
+          "tensor_broadcast_ms": 564.757,
+          "total_ms": 10524.845,
+          "tp_rank": "3/4"
+        }
+      ],
+      "torch_max_memory_allocated_bytes": 10165078016,
+      "torch_max_memory_reserved_bytes": 11179917312,
+      "torch_mem_get_info": {
+        "free_bytes": 71643037696,
+        "total_bytes": 85017493504
+      },
+      "torch_memory_allocated_bytes": 3627074048,
+      "torch_memory_reserved_bytes": 11179917312,
+      "tp_size": 4
+    }
+  ],
+  "result_paths": [
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank0_result.json",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank1_result.json",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank2_result.json",
+    "/data/encoder_tp_evidence_20260526/h100_encoder_only_video_tp4_slope_20260529/tp4_frames512/rank3_result.json"
+  ],
+  "returncodes": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "sample_summary": {
+    "gpus": {
+      "1": {
+        "index": 1,
+        "max_utilization_gpu_percent": 100,
+        "min_free_mib": 68840,
+        "name": "NVIDIA H100 80GB HBM3",
+        "peak_used_mib": 12239
+      },
+      "3": {
+        "index": 3,
+        "max_utilization_gpu_percent": 100,
+        "min_free_mib": 68834,
+        "name": "NVIDIA H100 80GB HBM3",
+        "peak_used_mib": 12245
+      },
+      "4": {
+        "index": 4,
+        "max_utilization_gpu_percent": 99,
+        "min_free_mib": 68839,
+        "name": "NVIDIA H100 80GB HBM3",
+        "peak_used_mib": 12241
+      },
+      "5": {
+        "index": 5,
+        "max_utilization_gpu_percent": 100,
+        "min_free_mib": 68841,
+        "name": "NVIDIA H100 80GB HBM3",
+        "peak_used_mib": 12239
+      }
+    },
+    "processes": {
+      "204118": {
+        "gpu_index": 1,
+        "gpu_uuid": "GPU-973ab323-059a-16d1-6542-dd2662b76360",
+        "peak_used_mib": 12446,
+        "pid": 204118,
+        "process_name": "/usr/bin/python"
+      },
+      "204119": {
+        "gpu_index": 3,
+        "gpu_uuid": "GPU-991e0141-8bcb-6f9c-7737-01063141cd23",
+        "peak_used_mib": 12426,
+        "pid": 204119,
+        "process_name": "/usr/bin/python"
+      },
+      "204120": {
+        "gpu_index": 4,
+        "gpu_uuid": "GPU-e4ac2e96-1b46-aa1f-dba3-86509a07a1ff",
+        "peak_used_mib": 12426,
+        "pid": 204120,
+        "process_name": "/usr/bin/python"
+      },
+      "204121": {
+        "gpu_index": 5,
+        "gpu_uuid": "GPU-8c2e7fe8-6622-46fc-374a-1b0bea3c1a31",
+        "peak_used_mib": 12426,
+        "pid": 204121,
+        "process_name": "/usr/bin/python"
+      }
+    },
+    "sample_count": 35
+  },
+  "success": true,
+  "timed_out": false,
+  "tp_size": 4
+}

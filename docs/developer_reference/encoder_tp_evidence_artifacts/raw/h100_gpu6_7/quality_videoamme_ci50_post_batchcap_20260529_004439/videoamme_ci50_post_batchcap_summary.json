@@ -1,0 +1,61 @@
+{
+  "artifact_root": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_batchcap_20260529_004439",
+  "benchmark_name": "Video-AMME CI-50 post encoder_max_batch_size c4 rerun",
+  "checkpoint": "/data/qwen3omni",
+  "dataset": "zhaochenyang20/Video_AMME_ci",
+  "config": {
+    "max_samples": 50,
+    "max_concurrency": 4,
+    "video_fps": 2,
+    "video_max_frames": 128,
+    "video_max_pixels": 401408,
+    "max_tokens": 256,
+    "temperature": 0.0
+  },
+  "run": {
+    "name": "pr_tp2_c4",
+    "benchmark_rc": "0",
+    "result_json": "/data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_batchcap_20260529_004439/pr_tp2_c4/results/videoamme_results.json",
+    "server_command": "CUDA_VISIBLE_DEVICES=6,7 PYTHONPATH=/tmp/qwen_vl_utils_0011:/data/sglang-omni SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 SGLANG_OMNI_ENCODER_TIMING_DETAIL=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python examples/qwen3_omni_encoder_tp.py --model /data/qwen3omni --encoder-backend sglang --image-tp 2 --audio-tp 2 --layout colocated-2gpu --host 0.0.0.0 --port 31542 --thinker-max-seq-len 32768 --thinker-mem-fraction-static 0.80 --talker-mem-fraction-static 0.12 --encoder-total-gpu-memory-fraction 0.01 --image-encoder-activation-budget-gib 8 --audio-encoder-activation-budget-gib 1",
+    "benchmark_command": "CUDA_VISIBLE_DEVICES=6,7 PYTHONPATH=/tmp/qwen_vl_utils_0011:/data/sglang-omni python -m benchmarks.eval.benchmark_omni_videoamme --model qwen3-omni --repo-id zhaochenyang20/Video_AMME_ci --max-samples 50 --max-concurrency 4 --video-fps 2 --video-max-frames 128 --video-max-pixels 401408 --max-tokens 256 --temperature 0.0 --timeout-s 500 --port 31542 --output-dir /data/encoder_tp_evidence_20260526/h100_gpu6_7/quality_videoamme_ci50_post_batchcap_20260529_004439/pr_tp2_c4/results",
+    "correct": 36,
+    "total_samples": 50,
+    "accuracy": 0.72,
+    "failed": 0,
+    "completed_requests": 50,
+    "failed_requests": 0,
+    "latency_mean_s": 15.941,
+    "latency_p95_s": 17.645,
+    "throughput_qps": 0.244,
+    "admission_batch_sizes": {
+      "image": {
+        "1": 50
+      },
+      "audio": {
+        "1": 50
+      }
+    },
+    "scheduler_configs": [
+      [
+        "image_encoder",
+        "1",
+        "8589934592"
+      ],
+      [
+        "image_encoder",
+        "1",
+        "8589934592"
+      ],
+      [
+        "audio_encoder",
+        "1",
+        "1073741824"
+      ],
+      [
+        "audio_encoder",
+        "1",
+        "1073741824"
+      ]
+    ]
+  }
+}

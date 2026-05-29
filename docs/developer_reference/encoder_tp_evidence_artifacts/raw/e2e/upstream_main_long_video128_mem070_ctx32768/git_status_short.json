@@ -1,0 +1,10 @@
+{
+  "cmd": [
+    "git",
+    "status",
+    "--short"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": ""
+}

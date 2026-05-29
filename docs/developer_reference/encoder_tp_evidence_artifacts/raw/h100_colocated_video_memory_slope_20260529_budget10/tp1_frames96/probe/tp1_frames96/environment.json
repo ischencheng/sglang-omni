@@ -1,0 +1,16 @@
+{
+  "cwd": "/data/sglang-omni",
+  "platform": "Linux-5.15.0-141-generic-x86_64-with-glibc2.39",
+  "python": "3.12.3 (main, Nov  6 2025, 13:44:16) [GCC 13.3.0]",
+  "repo": "/data/sglang-omni",
+  "torch": {
+    "cmd": [
+      "/usr/bin/python",
+      "-c",
+      "import torch, json; print(json.dumps({'version': torch.__version__, 'cuda': torch.version.cuda, 'cuda_available': torch.cuda.is_available(), 'device_count': torch.cuda.device_count()}))"
+    ],
+    "returncode": 0,
+    "stderr": "[W529 06:51:27.461266978 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())\n",
+    "stdout": "{\"version\": \"2.9.1+cu129\", \"cuda\": \"12.9\", \"cuda_available\": true, \"device_count\": 2}\n"
+  }
+}

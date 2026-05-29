@@ -1,0 +1,10 @@
+{
+  "cmd": [
+    "git",
+    "diff",
+    "--stat"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": ""
+}
