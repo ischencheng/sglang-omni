@@ -8,6 +8,7 @@ import pytest
 import typer
 
 from sglang_omni.cli.serve import (
+    apply_cpu_offload_cli_override,
     apply_cuda_graph_cli_overrides,
     apply_parallelism_cli_overrides,
     apply_torch_compile_cli_overrides,
@@ -56,6 +57,7 @@ def _serve_kwargs(**overrides):
         thinker_mem_fraction_static=None,
         talker_mem_fraction_static=None,
         encoder_mem_reserve=None,
+        cpu_offload_gb=None,
         log_level="info",
         thinker_tp_size=None,
         thinker_gpus=None,
@@ -296,6 +298,29 @@ def test_cuda_graph_cli_override_reaches_resolved_sglang_args():
 
     assert thinker_args["server_args_overrides"]["disable_cuda_graph"] is True
     assert talker_args["server_args_overrides"]["disable_cuda_graph"] is False
+
+
+def test_cpu_offload_cli_override_reaches_ar_stages_only():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    apply_cpu_offload_cli_override(config, cpu_offload_gb=4)
+
+    thinker = next(stage for stage in config.stages if stage.name == "thinker")
+    talker = next(stage for stage in config.stages if stage.name == "talker_ar")
+    thinker_args = resolve_stage_factory_args(thinker, config)
+    talker_args = resolve_stage_factory_args(talker, config)
+
+    assert thinker_args["server_args_overrides"]["cpu_offload_gb"] == 4
+    assert talker_args["server_args_overrides"]["cpu_offload_gb"] == 4
+    for non_ar_stage in ("image_encoder", "audio_encoder", "code2wav"):
+        assert "server_args_overrides" not in _stage(config, non_ar_stage).factory_args
+
+
+def test_cpu_offload_cli_override_rejects_negative_value():
+    config = Qwen3OmniSpeechPipelineConfig(model_path="dummy")
+
+    with pytest.raises(typer.BadParameter, match="cpu-offload-gb"):
+        apply_cpu_offload_cli_override(config, cpu_offload_gb=-1)
 
 
 def test_torch_compile_cli_override_reaches_resolved_sglang_args():

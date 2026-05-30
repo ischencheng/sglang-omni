@@ -255,29 +255,29 @@ def main() -> None:
         raise SystemExit("--encoder-max-batch-size must be positive")
 
     # Import after argparse so --help is fast.
-    from sglang_omni.models.qwen3_omni.config import (
-        Qwen3OmniSpeechPipelineConfig,
-    )
+    from sglang_omni.models.qwen3_omni.config import Qwen3OmniSpeechPipelineConfig
     from sglang_omni.serve.launcher import launch_server
 
-    if args.encoder_backend == "local" and (
-        args.image_tp != 1 or args.audio_tp != 1
-    ):
+    if args.encoder_backend == "local" and (args.image_tp != 1 or args.audio_tp != 1):
         raise SystemExit("backend='local' supports only --image-tp 1 --audio-tp 1")
     default_encoder_activation_budget_bytes = _gib_to_positive_bytes(
         "--encoder-activation-budget-gib", args.encoder_activation_budget_gib
     )
-    image_encoder_activation_budget_bytes = _gib_to_positive_bytes(
-        "--image-encoder-activation-budget-gib",
-        args.image_encoder_activation_budget_gib,
-    ) if args.image_encoder_activation_budget_gib is not None else (
-        default_encoder_activation_budget_bytes
+    image_encoder_activation_budget_bytes = (
+        _gib_to_positive_bytes(
+            "--image-encoder-activation-budget-gib",
+            args.image_encoder_activation_budget_gib,
+        )
+        if args.image_encoder_activation_budget_gib is not None
+        else (default_encoder_activation_budget_bytes)
     )
-    audio_encoder_activation_budget_bytes = _gib_to_positive_bytes(
-        "--audio-encoder-activation-budget-gib",
-        args.audio_encoder_activation_budget_gib,
-    ) if args.audio_encoder_activation_budget_gib is not None else (
-        default_encoder_activation_budget_bytes
+    audio_encoder_activation_budget_bytes = (
+        _gib_to_positive_bytes(
+            "--audio-encoder-activation-budget-gib",
+            args.audio_encoder_activation_budget_gib,
+        )
+        if args.audio_encoder_activation_budget_gib is not None
+        else (default_encoder_activation_budget_bytes)
     )
     image_gpus, audio_gpus, thinker_gpu, talker_gpu = _resolve_layout(
         layout=args.layout,

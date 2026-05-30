@@ -229,6 +229,34 @@ def apply_mem_fraction_cli_overrides(
     return pipeline_config
 
 
+def apply_cpu_offload_cli_override(
+    pipeline_config: PipelineConfig,
+    *,
+    cpu_offload_gb: int | None,
+) -> PipelineConfig:
+    if cpu_offload_gb is None:
+        return pipeline_config
+    cpu_offload_gb = int(cpu_offload_gb)
+    if cpu_offload_gb < 0:
+        raise typer.BadParameter("--cpu-offload-gb must be >= 0")
+    if cpu_offload_gb == 0:
+        return pipeline_config
+
+    role_to_stage = type(pipeline_config).mem_fraction_role_to_stage()
+    if not role_to_stage:
+        raise typer.BadParameter(
+            "--cpu-offload-gb requires a pipeline with a supported SGLang AR stage"
+        )
+    for stage_name in dict.fromkeys(role_to_stage.values()):
+        _apply_stage_server_args_override(
+            pipeline_config,
+            stage_name=stage_name,
+            updates={"cpu_offload_gb": cpu_offload_gb},
+            reason="CPU offload",
+        )
+    return pipeline_config
+
+
 def apply_encoder_mem_reserve_cli_override(
     pipeline_config: PipelineConfig,
     *,
@@ -625,6 +653,13 @@ def serve(
             ),
         ),
     ] = None,
+    cpu_offload_gb: Annotated[
+        int | None,
+        typer.Option(
+            "--cpu-offload-gb",
+            help="GB of SGLang AR model weights to offload to CPU.",
+        ),
+    ] = None,
     log_level: Annotated[
         Literal["debug", "info", "warning", "error", "critical"],
         typer.Option(help="Log level (default: info)."),
@@ -757,6 +792,10 @@ def serve(
         mem_fraction_static=mem_fraction_static,
         thinker_mem_fraction_static=thinker_mem_fraction_static,
         talker_mem_fraction_static=talker_mem_fraction_static,
+    )
+    merged_config = apply_cpu_offload_cli_override(
+        merged_config,
+        cpu_offload_gb=cpu_offload_gb,
     )
     merged_config = apply_encoder_mem_reserve_cli_override(
         merged_config,

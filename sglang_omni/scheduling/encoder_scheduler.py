@@ -51,7 +51,6 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 import torch.distributed as dist
-
 from sglang.srt.utils import broadcast_pyobj
 
 from sglang_omni.pipeline.relay_io import extract_tensors, restore_tensors
@@ -64,10 +63,7 @@ from sglang_omni.utils.gpu_memory import (
 
 if TYPE_CHECKING:
     from sglang_omni.model_runner.sglang_encoder_runner import SGLangEncoderRunner
-    from sglang_omni.models.qwen3_omni.encoder_adapters import (
-        BatchPlan,
-        EncoderAdapter,
-    )
+    from sglang_omni.models.qwen3_omni.encoder_adapters import EncoderAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +103,7 @@ def _reservation_path_for_gpu(logical_gpu_id: int) -> Path:
     )
     suffix = startup_lock.name.removeprefix("sglang_omni_gpu_")
     suffix = suffix.removesuffix("_startup.lock")
-    return startup_lock.with_name(
-        f"sglang_omni_encoder_gpu_{suffix}_reservations.json"
-    )
+    return startup_lock.with_name(f"sglang_omni_encoder_gpu_{suffix}_reservations.json")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -130,6 +124,7 @@ class _TensorSpec:
     ``relay_io.extract_tensors`` produces, which would force a parser on
     the non-entry-rank side).
     """
+
     path: str
     shape: tuple[int, ...]
     dtype: torch.dtype
@@ -303,8 +298,7 @@ class _EncoderGpuMemoryGuard:
                         reason="telemetry_unavailable",
                         batch_cost_bytes=batch_cost,
                         reserved_bytes=sum(
-                            int(item.get("bytes", 0))
-                            for item in reservations.values()
+                            int(item.get("bytes", 0)) for item in reservations.values()
                         ),
                         transient_margin_bytes=self.transient_margin_bytes,
                         allocator_margin_bytes=self.allocator_margin_bytes,
@@ -443,9 +437,7 @@ class EncoderScheduler:
             if max_single_request_cost is not None
             else None
         )
-        self._pending_messages: collections.deque[IncomingMessage] = (
-            collections.deque()
-        )
+        self._pending_messages: collections.deque[IncomingMessage] = collections.deque()
         self._gpu_memory_guard = (
             gpu_memory_guard
             if gpu_memory_guard is not None
@@ -512,9 +504,11 @@ class EncoderScheduler:
                 if self.runner.is_entry_rank:
                     self._emit_error(
                         messages,
-                        recv_err
-                        if recv_err is not None
-                        else RuntimeError("peer-rank encoder recv failed"),
+                        (
+                            recv_err
+                            if recv_err is not None
+                            else RuntimeError("peer-rank encoder recv failed")
+                        ),
                     )
                 self._release_active_reservation()
                 continue
@@ -535,9 +529,11 @@ class EncoderScheduler:
                 if self.runner.is_entry_rank:
                     self._emit_error(
                         messages,
-                        build_err
-                        if build_err is not None
-                        else RuntimeError("peer-rank encoder build_batch failed"),
+                        (
+                            build_err
+                            if build_err is not None
+                            else RuntimeError("peer-rank encoder build_batch failed")
+                        ),
                     )
                 self._release_active_reservation()
                 continue
@@ -752,7 +748,9 @@ class EncoderScheduler:
         """
         logger.exception(
             "Fatal TP encoder forward failure on rank %d/%d: %r",
-            self.runner.tp_rank, self.runner.tp_size, error,
+            self.runner.tp_rank,
+            self.runner.tp_size,
+            error,
         )
         os._exit(1)
 
@@ -912,9 +910,9 @@ class EncoderScheduler:
         core inbox batching rule.
 
         Raises:
-            BatchCollectError: ``request_cost_fn`` (adapter / model code)
-                raised. Carries the drained list so the caller can emit
-                one error per request instead of silently dropping them.
+            BatchCollectError: the first request or the admitted batch
+                failed admission. Later candidate failures are emitted for
+                that candidate only so already-admitted requests can proceed.
         """
         first = self._next_message()
         if first is None:
@@ -950,15 +948,18 @@ class EncoderScheduler:
             try:
                 self._validate_single_message(msg)
             except Exception as exc:  # noqa: BLE001
-                batch.append(msg)  # so the failed request gets an error
-                raise BatchCollectError(batch, exc) from exc
+                self._emit_error([msg], exc)
+                break
 
             candidate = batch + [msg]
             try:
-                candidate_cost = self._batch_cost(candidate)
+                if self._batch_cost_fn is None:
+                    candidate_cost = batch_cost + self._message_cost(msg)
+                else:
+                    candidate_cost = self._batch_cost(candidate)
             except Exception as exc:  # noqa: BLE001
-                batch.append(msg)  # so the failed request gets an error
-                raise BatchCollectError(batch, exc) from exc
+                self._emit_error([msg], exc)
+                break
             if self._max_batch_cost is not None:
                 if candidate_cost > self._max_batch_cost:
                     logger.info(
@@ -1155,9 +1156,7 @@ class EncoderScheduler:
                 return local, collect_err
             try:
                 started = time.perf_counter()
-                meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(
-                    local
-                )
+                meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(local)
                 timing.strip_h2d_ms = (time.perf_counter() - started) * 1000.0
                 self._log_memory_mark(
                     "after_strip_h2d",
@@ -1184,11 +1183,11 @@ class EncoderScheduler:
                 started = time.perf_counter()
                 broadcast_pyobj(
                     [{"kind": _RECV_ERROR_KIND, "error": repr(collect_err)}],
-                    tp.rank, tp.cpu_group, src=src_rank,
+                    tp.rank,
+                    tp.cpu_group,
+                    src=src_rank,
                 )
-                timing.metadata_broadcast_ms = (
-                    time.perf_counter() - started
-                ) * 1000.0
+                timing.metadata_broadcast_ms = (time.perf_counter() - started) * 1000.0
                 self._log_memory_mark(
                     "after_metadata_broadcast",
                     batch_size=len(local),
@@ -1197,9 +1196,7 @@ class EncoderScheduler:
 
             try:
                 started = time.perf_counter()
-                meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(
-                    local
-                )
+                meta_msgs, tensor_lists, specs_lists = self._strip_and_lift(local)
                 timing.strip_h2d_ms = (time.perf_counter() - started) * 1000.0
                 self._log_memory_mark(
                     "after_strip_h2d",
@@ -1209,11 +1206,11 @@ class EncoderScheduler:
                 started = time.perf_counter()
                 broadcast_pyobj(
                     [{"kind": _RECV_ERROR_KIND, "error": repr(exc)}],
-                    tp.rank, tp.cpu_group, src=src_rank,
+                    tp.rank,
+                    tp.cpu_group,
+                    src=src_rank,
                 )
-                timing.metadata_broadcast_ms = (
-                    time.perf_counter() - started
-                ) * 1000.0
+                timing.metadata_broadcast_ms = (time.perf_counter() - started) * 1000.0
                 self._log_memory_mark(
                     "after_metadata_broadcast",
                     batch_size=len(local),
@@ -1224,11 +1221,11 @@ class EncoderScheduler:
             batch_cost = self._batch_cost(meta_msgs)
             broadcast_pyobj(
                 [meta_msgs, specs_lists, batch_cost],
-                tp.rank, tp.cpu_group, src=src_rank,
+                tp.rank,
+                tp.cpu_group,
+                src=src_rank,
             )
-            timing.metadata_broadcast_ms = (
-                time.perf_counter() - started
-            ) * 1000.0
+            timing.metadata_broadcast_ms = (time.perf_counter() - started) * 1000.0
             self._log_memory_mark(
                 "after_metadata_broadcast",
                 batch_size=len(meta_msgs),
@@ -1236,25 +1233,19 @@ class EncoderScheduler:
 
             started = time.perf_counter()
             ok_flags = self._allocation_ready_gather(local_ok=True)
-            timing.allocation_handshake_ms = (
-                time.perf_counter() - started
-            ) * 1000.0
+            timing.allocation_handshake_ms = (time.perf_counter() - started) * 1000.0
             self._log_memory_mark(
                 "after_allocation_handshake",
                 batch_size=len(meta_msgs),
             )
             if not all(ok_flags):
-                return local, RuntimeError(
-                    "peer-rank tensor allocation failed"
-                )
+                return local, RuntimeError("peer-rank tensor allocation failed")
 
             started = time.perf_counter()
             for tensor_list in tensor_lists:
                 for t in tensor_list:
                     dist.broadcast(t, src=src_rank, group=tp.device_group)
-            timing.tensor_broadcast_ms = (
-                time.perf_counter() - started
-            ) * 1000.0
+            timing.tensor_broadcast_ms = (time.perf_counter() - started) * 1000.0
             self._log_memory_mark(
                 "after_tensor_broadcast",
                 batch_size=len(meta_msgs),
@@ -1317,17 +1308,13 @@ class EncoderScheduler:
                         for spec in specs
                     ]
                 )
-            timing.follower_allocation_ms = (
-                time.perf_counter() - started
-            ) * 1000.0
+            timing.follower_allocation_ms = (time.perf_counter() - started) * 1000.0
             self._log_memory_mark(
                 "after_follower_allocation",
                 batch_size=len(meta_msgs),
             )
         except Exception as exc:  # noqa: BLE001
-            timing.follower_allocation_ms = (
-                time.perf_counter() - started
-            ) * 1000.0
+            timing.follower_allocation_ms = (time.perf_counter() - started) * 1000.0
             self._log_memory_mark(
                 "after_follower_allocation",
                 batch_size=len(meta_msgs) if "meta_msgs" in locals() else 0,
@@ -1336,9 +1323,7 @@ class EncoderScheduler:
 
         started = time.perf_counter()
         ok_flags = self._allocation_ready_gather(local_ok=alloc_err is None)
-        timing.allocation_handshake_ms = (
-            time.perf_counter() - started
-        ) * 1000.0
+        timing.allocation_handshake_ms = (time.perf_counter() - started) * 1000.0
         self._log_memory_mark(
             "after_allocation_handshake",
             batch_size=len(meta_msgs),
@@ -1360,9 +1345,7 @@ class EncoderScheduler:
             batch_size=len(meta_msgs),
         )
 
-        out = self._reattach_lifted_tensors(
-            meta_msgs, placeholders, specs_lists
-        )
+        out = self._reattach_lifted_tensors(meta_msgs, placeholders, specs_lists)
         self._record_rank_wait_skew(timing)
         return out, None
 
