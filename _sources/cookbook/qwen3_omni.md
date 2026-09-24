@@ -8,16 +8,19 @@ command for your hardware, then check the tables to confirm your combination is 
 ## Prerequisites
 
 ```bash
-docker pull frankleeeee/sglang-omni:dev
-docker run -it --shm-size 32g --gpus all frankleeeee/sglang-omni:dev /bin/zsh
+docker pull hongccc/sglang-omni:dev
+docker run -it --shm-size 32g --gpus all hongccc/sglang-omni:dev /bin/zsh
 ```
 
 ```bash
-git clone https://github.com/sgl-project/sglang-omni.git
-cd sglang-omni
+pip install --upgrade pip
+pip install uv
+
 uv venv .venv -p 3.12 && source .venv/bin/activate
-uv pip install -v .
+uv pip install --prerelease=allow "sglang-omni==0.1.6"
 ```
+
+See [Installation](../get_started/installation.md) for Docker digests and source installs.
 
 ## Server Configuration
 
@@ -36,12 +39,16 @@ Colocated topology requires `--config examples/configs/qwen3_omni_colocated_h20.
 |---|---|---|---|---|
 | Thinker-only | — | — | BF16 | ✅ |
 | Thinker-only | — | — | FP8 | ✅ |
+| Thinker-only | — | — | AutoRound INT4 | ✅ |
 | Thinker-Talker | Disaggregated | TP=1 | BF16 | ✅ |
 | Thinker-Talker | Disaggregated | TP=1 | FP8 | ✅ |
+| Thinker-Talker | Disaggregated | TP=1 | AutoRound INT4 thinker + BF16 talker/code2wav | ✅ |
 | Thinker-Talker | Disaggregated | TP=2 | BF16 | ✅ |
 | Thinker-Talker | Disaggregated | TP=2 | FP8 | ✅ |
+| Thinker-Talker | Disaggregated | TP=2 | AutoRound INT4 thinker + BF16 talker/code2wav | ✅ |
 | Thinker-Talker | Colocated | TP=1 | BF16 | ✅ |
 | Thinker-Talker | Colocated | TP=1 | FP8 | ✅ |
+| Thinker-Talker | Colocated | TP=1 | AutoRound INT4 thinker + BF16 talker/code2wav | ✅ |
 
 ## Input / Output Modalities
 
@@ -79,10 +86,11 @@ Standard sampling parameters apply to the thinker stage. When `modalities` inclu
 | `min_p` | float | `0.0` | Thinker |
 | `repetition_penalty` | float | `1.0` | Thinker |
 | `max_tokens` | int | `2048` | Thinker |
+| `max_completion_tokens` | int | `null` | Thinker; OpenAI-compatible alias for `max_tokens` |
 | `stop` | str \| list | `null` | Thinker |
 | `seed` | int | `null` | Thinker |
 | `stream` | bool | `false` | Both |
-| `audio` | dict | `null` | Talker (speech output only) — format config, e.g. `{"voice": "default", "format": "wav"}` |
+| `audio` | dict | `null` | Speech response format config, e.g. `{"format": "wav"}` |
 | `talker_temperature` | float | `0.9` | Talker (audio output only) |
 | `talker_top_p` | float | `1.0` | Talker (audio output only) |
 | `talker_top_k` | int | `50` | Talker (audio output only) |
@@ -100,5 +108,5 @@ Standard sampling parameters apply to the thinker stage. When `modalities` inclu
 
 - **`modalities: ["text", "audio"]` has no effect on a text-only server.** No error is raised — the response simply contains no audio. Use a speech-mode server (without `--text-only`) to get audio output.
 - **`content` must be `""` when the query is entirely in `audios`, `videos`, or `images`.** Leaving a text query in `content` alongside audio causes the model to process both, which is usually not what you want.
-- **Colocated topology does not support `--thinker-tp-size 2`.** The server raises a `ValueError` at startup ("Qwen Phase 1 colocation does not support thinker TP"). Use disaggregated topology for TP=2.
+- **Colocated topology does not support `--thinker.tp_size 2`.** The server raises a `ValueError` at startup ("Qwen Phase 1 colocation does not support thinker TP"). Use disaggregated topology for TP=2.
 - **Requests that exceed the model's context length are rejected with an error.** The preprocessor raises a `ValueError` when the prompt token count alone meets or exceeds `max_seq_len`, or when `prompt tokens + max_new_tokens ≥ max_seq_len`. Reduce input length or lower `max_tokens` to stay within the limit.

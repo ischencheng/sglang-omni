@@ -13,7 +13,7 @@ Install `sglang-omni` by following [Installation](../get_started/installation.md
 
 ```bash
 # Voxtral preprocessing uses Mistral's Tekken tokenizer from mistral-common.
-uv pip install 'mistral-common[audio]>=1.8.0'
+uv pip install 'mistral_common[audio]>=1.11.0'
 
 hf download mistralai/Voxtral-4B-TTS-2603
 ```
@@ -23,6 +23,7 @@ The model repository is public, so no Hugging Face token is required.
 ## Server Configuration
 
 The pipeline is `preprocessing → tts_generation → vocoder`.
+First startup can take several minutes while the `tts_generation` stage captures CUDA graphs.
 
 ```bash
 sgl-omni serve \
@@ -33,14 +34,19 @@ sgl-omni serve \
 
 ## Synthesizing Speech
 
-### Zero-shot
+### Preset Voice
 
-With no voice specified, Voxtral falls back to its default voice (`cheerful_female`).
+Voxtral ships preset voices with the checkpoint. Use `cheerful_female` for the
+default preset voice.
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"input": "SGLang-Omni is a great project!"}' \
+  -d '{
+    "model": "mistralai/Voxtral-4B-TTS-2603",
+    "voice": "cheerful_female",
+    "input": "SGLang-Omni is a great project!"
+  }' \
   --output output.wav
 ```
 
@@ -53,8 +59,9 @@ one with the `voice` field:
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "Get the trust fund to the bank early.",
+    "model": "mistralai/Voxtral-4B-TTS-2603",
     "voice": "casual_male",
+    "input": "Get the trust fund to the bank early.",
     "max_new_tokens": 4096
   }' \
   --output output.wav
@@ -64,7 +71,8 @@ The available voices ship inside the checkpoint as `voice_embedding/*.pt` files.
 from your downloaded snapshot:
 
 ```bash
-ls "$(hf download mistralai/Voxtral-4B-TTS-2603)/voice_embedding"
+MODEL_PATH="$(hf download mistralai/Voxtral-4B-TTS-2603 --quiet)"
+ls "${MODEL_PATH}/voice_embedding"
 ```
 
 #### Python
@@ -75,8 +83,9 @@ import requests
 resp = requests.post(
     "http://localhost:8000/v1/audio/speech",
     json={
-        "input": "Get the trust fund to the bank early.",
+        "model": "mistralai/Voxtral-4B-TTS-2603",
         "voice": "casual_male",
+        "input": "Get the trust fund to the bank early.",
         "max_new_tokens": 4096,
     },
 )
@@ -87,30 +96,36 @@ with open("output.wav", "wb") as f:
 
 ### Streaming
 
-Set `"stream": true` to receive audio chunks in real time over Server-Sent Events (SSE):
+Set `"stream": true` and `"response_format": "pcm"` to receive raw PCM audio
+chunks in real time:
 
 ```bash
 curl -N -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "Get the trust fund to the bank early.",
+    "model": "mistralai/Voxtral-4B-TTS-2603",
     "voice": "casual_male",
-    "stream": true
-  }'
+    "input": "Get the trust fund to the bank early.",
+    "stream": true,
+    "response_format": "pcm"
+  }' \
+  --output output.pcm
 ```
 
-Each event carries a base64-encoded audio chunk; the stream ends with `data: [DONE]`. See the
-[Higgs TTS cookbook](../cookbook/higgs_tts.md#streaming) for a full Python SSE consumer.
+Streaming returns `audio/pcm` 16-bit mono PCM bytes with sample-rate metadata in
+the response headers. See the [Higgs TTS cookbook](../cookbook/higgs_tts.md#streaming)
+for a full Python raw PCM consumer.
 
 ## Request Parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
+| `model` | served model | Served model identifier |
 | `input` | (required) | Text to synthesize |
-| `voice` | `cheerful_female` | Preset voice name from the checkpoint's `voice_embedding/` directory |
+| `voice` | `default` | Preset voice name from the checkpoint's `voice_embedding/` directory |
 | `max_new_tokens` | `4096` | Maximum number of generated acoustic tokens |
-| `response_format` | `wav` | Output container |
-| `stream` | `false` | Stream audio chunks over SSE |
+| `response_format` | `wav` | Output container (`wav`, `mp3`, `flac`, `opus`, `aac`, `pcm`) |
+| `stream` | `false` | Stream raw PCM audio chunks |
 
 > Voxtral generation is **deterministic**: the engine fixes `temperature` to `0.0`, so sampling
 > parameters such as `top_p`, `top_k`, and `temperature` are not used. Reference-clip voice
@@ -135,10 +150,10 @@ Whisper-large-v3. Hardware: 1× H200 SXM.
 | Throughput (req/s) | 5.40 |
 | Completed / failed requests | 1088 / 0 |
 
-Reproduce with the SeedTTS command in our [seedTTS benchmark](../../benchmarks/README.md). The Voxtral
-model card also quotes ~70 ms first-audio latency at concurrency 1; the table above is a
-throughput-oriented run at concurrency 16, so its RTF reflects batched load rather than the
-latency-optimized single-stream figure. Output is 24 kHz.
+Reproduce with the SeedTTS command documented in `benchmarks/README.md`. The Voxtral model card
+also quotes ~70 ms first-audio latency at concurrency 1; the table above is a throughput-oriented
+run at concurrency 16, so its RTF reflects batched load rather than the latency-optimized
+single-stream figure. Output is 24 kHz.
 
 ## Known Limitations
 

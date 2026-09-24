@@ -97,7 +97,14 @@ shared helpers do the heavy lifting:
 - `create_sglang_infrastructure(server_args, gpu_id, *, model_arch_override=...)`
   from `sglang_omni.scheduling.bootstrap`, which returns the
   `(model_worker, tree_cache, req_to_token_pool, token_to_kv_pool_allocator,
-  prefill_mgr, decode_mgr, model_config)` tuple that `OmniScheduler` expects
+  model_config)` tuple that `OmniScheduler` expects
+
+Every GPU stage factory you write — the engine as well as encoders and
+vocoders — declares `device: str | None = None, gpu_id: int | None = None`
+and resolves them with `sglang_omni.utils.device.resolve_concrete_device`;
+never hard-code `"cuda"` or read `gpu_id` on its own. The contract and the
+sweep test that enforces it are described under "Device and GPU placement
+contract" in [config.md](config.md).
 
 Two pieces of glue still have to be added by hand:
 
@@ -111,10 +118,10 @@ Two pieces of glue still have to be added by hand:
 
 ## Where the request comes in
 
-`POST /v1/audio/speech` builds a `GenerateRequest` from the OpenAI payload in
-`sglang_omni/serve/openai_api.py::build_speech_generate_request`. That request
-enters the pipeline and your model's request builder turns it into whatever
-the AR scheduler needs.
+`POST /v1/audio/speech` validates the OpenAI payload through
+`sglang_omni/serve/speech_service.py::SpeechRequestValidator`, then lowers it
+into a `GenerateRequest`. That request enters the pipeline and your model's
+request builder turns it into whatever the AR scheduler needs.
 
 Two things are easy to get wrong at this boundary:
 
@@ -153,7 +160,7 @@ Pick by responsibility:
 
 - `SimpleScheduler` - a single callable, optionally batched via
   `batch_compute_fn`. Right for preprocessing and most vocoders.
-- `OmniScheduler` - wraps SGLang's prefill/decode managers, KV cache, and
+- `OmniScheduler` - wraps SGLang's scheduler methods, KV cache, and
   request-limit machinery. Use it for AR generation.
 - A custom scheduler - when neither of the above fits (stateful streaming
   vocoder, custom detokenizer, etc.).
