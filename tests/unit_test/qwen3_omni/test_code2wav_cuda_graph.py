@@ -263,6 +263,62 @@ def test_build_captures_only_the_explicit_graph_keys() -> None:
     }
 
 
+def test_padded_replay_keeps_real_rows_and_clears_reused_dummy_rows() -> None:
+    backend = FakeCudaBackend()
+    model = FakeModel()
+    runner = Code2WavCudaGraphRunner.build(
+        model,
+        device="cuda:0",
+        num_quantizers=16,
+        total_gpu_memory_fraction=0.5,
+        graph_keys=tuple(GraphKey(batch_size=size, frames=10) for size in (1, 2, 4, 8)),
+        device_api=backend,
+    )
+
+    for replay_index, batch_size in enumerate((4, 3, 7, 5, 6, 3)):
+        codes = make_codes(backend, batch_size, 10)
+        codes.add_(replay_index * 100)
+        result = runner.run(codes, pad_batch=True)
+        replay_input = model.calls[-1]
+        expected_batch = 4 if batch_size <= 4 else 8
+        assert result.execution_mode == "cuda_graph"
+        assert result.key == GraphKey(batch_size=expected_batch, frames=10)
+        assert result.output.shape == (batch_size, 1, 20)
+        assert torch.equal(result.output, model(codes))
+        assert torch.equal(replay_input[:batch_size], codes)
+        assert torch.count_nonzero(replay_input[batch_size:]) == 0
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "frames", "eligible", "reason"),
+    [
+        (3, 11, True, "key_miss"),
+        (5, 10, True, "key_miss"),
+        (3, 10, False, "ineligible"),
+    ],
+)
+def test_batch_padding_fallback_preserves_the_original_input(
+    batch_size: int, frames: int, eligible: bool, reason: str
+) -> None:
+    backend = FakeCudaBackend()
+    model = FakeModel()
+    runner = Code2WavCudaGraphRunner.build(
+        model,
+        device="cuda:0",
+        num_quantizers=16,
+        total_gpu_memory_fraction=0.5,
+        graph_keys=tuple(GraphKey(batch_size=size, frames=10) for size in (1, 4)),
+        device_api=backend,
+    )
+    codes = make_codes(backend, batch_size, frames)
+    result = runner.run(codes, eligible=eligible, pad_batch=True)
+
+    assert result.execution_mode == "eager"
+    assert result.fallback_reason == reason
+    assert torch.equal(model.calls[-1], codes)
+    assert torch.equal(result.output, model(codes))
+
+
 def test_build_uses_three_warmups_one_private_pool_and_atomic_publication() -> None:
     runner, backend, model = build_runner()
 
@@ -452,16 +508,18 @@ def test_real_cuda_invalid_capture_preserves_current_stream() -> None:
 
 @pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_real_cuda_shared_pool_replays_batch_sizes_with_eager_parity() -> None:
+@pytest.mark.parametrize("pad_batch", [False, True])
+def test_real_cuda_shared_pool_replays_batch_sizes_with_eager_parity(
+    pad_batch: bool,
+) -> None:
     class TinyCode2WavModel(torch.nn.Module):
         def forward(self, codes: torch.Tensor) -> torch.Tensor:
             return (codes.float() * 2).sum(dim=1, keepdim=True)
 
     device = torch.device("cuda", torch.cuda.current_device())
     model = TinyCode2WavModel().to(device).eval()
-    graph_keys = (
-        GraphKey(batch_size=1, frames=10),
-        GraphKey(batch_size=2, frames=10),
+    graph_keys = tuple(
+        GraphKey(batch_size=batch_size, frames=10) for batch_size in (1, 2, 4, 8)
     )
     runner = Code2WavCudaGraphRunner.build(
         model,
@@ -475,22 +533,30 @@ def test_real_cuda_shared_pool_replays_batch_sizes_with_eager_parity() -> None:
     assert stats["enabled"] is True
     assert stats["build"]["published_graph_count"] == len(graph_keys)
 
-    for replay_index, key in enumerate((*graph_keys, *graph_keys)):
+    batch_sizes = (4, 3, 7, 5, 6, 3, 8, 1) if pad_batch else (8, 4, 2, 1, 8, 4, 2, 1)
+    for replay_index, batch_size in enumerate(batch_sizes):
         codes = (
             torch.arange(
-                key.batch_size * 2 * key.frames,
+                batch_size * 2 * 10,
                 dtype=torch.long,
                 device=device,
-            ).reshape(key.batch_size, 2, key.frames)
+            ).reshape(batch_size, 2, 10)
             + replay_index * 1000
         )
         with torch.inference_mode():
             eager = model(codes).clone()
-        result = runner.run(codes)
+        result = runner.run(codes, pad_batch=pad_batch)
         graph_output = result.output.clone()
 
         assert result.execution_mode == "cuda_graph"
-        assert result.key == key
+        assert result.key == GraphKey(
+            batch_size=min(size for size in (1, 2, 4, 8) if size >= batch_size),
+            frames=10,
+        )
+        assert (
+            result.output.data_ptr()
+            == runner.graphs[result.key].static_output.data_ptr()
+        )
         assert torch.equal(graph_output, eager)
 
 

@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from sglang_omni.models.qwen3_omni.components.code2wav_cuda_graph import (
@@ -39,8 +40,23 @@ class FakeGraphRunner:
             )
         )
 
-    def run(self, codes: torch.Tensor, *, eligible: bool) -> Code2WavRunResult:
+    def run(
+        self, codes: torch.Tensor, *, eligible: bool, pad_batch: bool = False
+    ) -> Code2WavRunResult:
         key = GraphKey(batch_size=int(codes.shape[0]), frames=int(codes.shape[-1]))
+        if eligible and pad_batch:
+            key = min(
+                (
+                    available
+                    for available in self.keys
+                    if available.frames == key.frames
+                    and available.batch_size >= key.batch_size
+                ),
+                key=lambda available: available.batch_size,
+                default=key,
+            )
+        else:
+            pass
         if eligible and key in self.keys:
             mode, reason = "cuda_graph", None
         elif eligible:
@@ -780,6 +796,83 @@ def test_large_batch_classes_stay_on_the_early_windows() -> None:
     assert {key.batch_size for key in batched_graph_keys(10, 25, 8, 2)} == {1, 2, 4, 8}
 
 
+@pytest.mark.parametrize("strategy", ["split", "pad", "exact"])
+@pytest.mark.parametrize("batch_size", [3, 5, 6, 7])
+def test_batch_graph_strategies_preserve_request_order_and_context_trim(
+    strategy: str, batch_size: int
+) -> None:
+    model = FakeCode2WavModel(total_upsample=2)
+    runner = FakeGraphRunner(
+        model, batched_graph_keys(2, 1, 8, batch_graph_strategy=strategy)
+    )
+    scheduler = Code2WavScheduler(
+        model,
+        device="cpu",
+        stream_chunk_size=2,
+        left_context_size=1,
+        enable_batching=True,
+        enable_cuda_graph=True,
+        cuda_graph_runner=runner,
+        batch_graph_strategy=strategy,
+    )
+    request_ids = [f"request-{i}" for i in range(batch_size)]
+    first_audio: dict[str, np.ndarray] = {}
+    for chunk_index in (0, 2):
+        feed_batch(
+            scheduler,
+            [
+                (request_id, 10 * i + chunk_index + offset)
+                for i, request_id in enumerate(request_ids)
+                for offset in (1, 2)
+            ],
+        )
+        messages = drain_outbox(scheduler)
+        assert [message.request_id for message in messages] == request_ids
+        for i, message in enumerate(messages):
+            context = 0 if chunk_index == 0 else 1
+            window_codes = np.arange(
+                10 * i + chunk_index + 1 - context,
+                10 * i + chunk_index + 3,
+            )
+            expected = 11 * window_codes.sum() + np.arange(2 * context, 2 * context + 4)
+            audio = np.frombuffer(message.data["audio_waveform"], dtype=np.float32)
+            np.testing.assert_array_equal(audio, expected)
+            if chunk_index == 0:
+                first_audio[message.request_id] = audio
+            else:
+                np.testing.assert_array_equal(
+                    first_audio[message.request_id],
+                    11 * (20 * i + 3) + np.arange(4),
+                )
+    expected_forwards = (
+        len(scheduler.decompose_batch(batch_size)) if strategy == "split" else 1
+    )
+    assert len(runner.calls) == 2 * expected_forwards
+    assert all(mode == "cuda_graph" for _, _, mode in runner.calls)
+    assert all(state.emitted == 4 for state in scheduler.stream_states.values())
+
+
+@pytest.mark.parametrize("strategy", ["pad", "exact"])
+@pytest.mark.parametrize("sizes", [(4, 2, 1), (1,), ()])
+def test_batch_graph_strategy_respects_published_capacity(
+    strategy: str, sizes: tuple[int, ...]
+) -> None:
+    scheduler = make_batching_scheduler(
+        enable_cuda_graph=True,
+        cuda_graph_runner=AvailabilityRunner(sizes),
+        batch_graph_strategy=strategy,
+    )
+    plan = scheduler.build_step_plan(states_with_ready(7, ready=2))
+    if not sizes:
+        assert plan == [7]
+    elif sizes == (1,):
+        assert plan == [1] * 7
+    elif strategy == "pad":
+        assert plan == [4, 3]
+    else:
+        assert plan == [4, 2, 1]
+
+
 def test_pinned_slot_pool_covers_a_coalesced_step() -> None:
     model = FakeCode2WavModel(total_upsample=2)
     scheduler = Code2WavScheduler(
@@ -843,7 +936,8 @@ def test_batched_graph_keys_cover_decompose_sizes() -> None:
     assert {key.batch_size for key in capped} == {1, 2, 4}
 
 
-def test_factory_builds_batched_keys_with_batching(monkeypatch) -> None:
+@pytest.mark.parametrize("strategy", ["split", "pad", "exact"])
+def test_factory_builds_batched_keys_with_batching(monkeypatch, strategy: str) -> None:
     import sglang_omni.models.qwen3_omni.components.code2wav_scheduler as mod
 
     def fake_load(path, *, device, dtype):
@@ -870,6 +964,7 @@ def test_factory_builds_batched_keys_with_batching(monkeypatch) -> None:
         enable_cuda_graph=True,
         batch_ceiling=4,
         total_gpu_memory_fraction=0.05,
+        batch_graph_strategy=strategy,
     )
     keys = captured["graph_keys"]
     assert GraphKey(batch_size=1, frames=3) in keys
@@ -877,6 +972,19 @@ def test_factory_builds_batched_keys_with_batching(monkeypatch) -> None:
     assert GraphKey(batch_size=4, frames=2) in keys
     assert all(key.batch_size <= 4 for key in keys)
     assert scheduler.chunk_aligned_dispatch is True
+    assert scheduler.batch_graph_strategy == strategy
+    assert (GraphKey(batch_size=3, frames=3) in keys) is (strategy == "exact")
+
+
+def test_invalid_batch_graph_strategy_fails_before_model_load() -> None:
+    from sglang_omni.models.qwen3_omni.components.code2wav_scheduler import (
+        create_code2wav_scheduler,
+    )
+
+    with pytest.raises(ValueError, match="batch graph strategy"):
+        create_code2wav_scheduler(
+            "unused", device="cpu", batch_graph_strategy="unknown"
+        )
 
 
 def test_serial_only_runner_splits_groups_into_safe_b1_replays() -> None:

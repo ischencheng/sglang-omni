@@ -11,7 +11,7 @@ import logging
 import queue
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import numpy as np
 import torch
@@ -87,14 +87,21 @@ def batched_graph_keys(
     left_context_size: int,
     batch_ceiling: int,
     initial_chunk_frames: int = 0,
+    *,
+    batch_graph_strategy: Literal["split", "pad", "exact"] = "split",
 ) -> tuple[GraphKey, ...]:
     serial = serial_threshold_graph_keys(
         stream_chunk_size, left_context_size, initial_chunk_frames
     )
+    batch_sizes = (
+        range(2, batch_ceiling + 1)
+        if batch_graph_strategy == "exact"
+        else sorted(size for size in _DECOMPOSE_SIZES if size > 1)
+    )
     return serial + tuple(
         (
             GraphKey(batch_size=batch_size, frames=key.frames)
-            for batch_size in sorted((size for size in _DECOMPOSE_SIZES if size > 1))
+            for batch_size in batch_sizes
             if batch_size <= batch_ceiling
             for key in serial
             if batch_size <= _STEADY_BATCH_MAX or key.frames <= _LARGE_BATCH_MAX_FRAMES
@@ -176,7 +183,15 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         enable_output_overlap: bool = True,
         enable_cuda_graph: bool = False,
         cuda_graph_runner: Code2WavCudaGraphRunner | None = None,
+        batch_graph_strategy: Literal["split", "pad", "exact"] = "split",
     ):
+        if batch_graph_strategy not in ("split", "pad", "exact"):
+            raise ValueError(
+                f"Invalid Code2Wav batch graph strategy: {batch_graph_strategy}"
+            )
+        else:
+            pass
+        self.batch_graph_strategy = batch_graph_strategy
         self.model = model
         self.device = torch.device(device)
         self.stream_chunk_size = max(int(stream_chunk_size), 1)
@@ -725,6 +740,10 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
                     key=None,
                     fallback_reason=None,
                 )
+            elif graph_eligible and self.batch_graph_strategy == "pad":
+                result = self.cuda_graph_runner.run(
+                    codes, eligible=True, pad_batch=True
+                )
             else:
                 result = self.cuda_graph_runner.run(codes, eligible=graph_eligible)
         graph_key = None
@@ -1045,6 +1064,8 @@ class Code2WavScheduler(StreamingVocoderBase[Code2WavStreamState, "list[int]"]):
         )
         if not sizes:
             return [1] * len(participants)
+        elif self.batch_graph_strategy == "pad":
+            return self.decompose_batch(len(participants), sizes[:1])
         else:
             pass
         return self.decompose_batch(len(participants), sizes)
@@ -1211,10 +1232,17 @@ def create_code2wav_scheduler(
     enable_output_overlap: bool = True,
     enable_cuda_graph: bool = False,
     total_gpu_memory_fraction: float | None = None,
+    batch_graph_strategy: Literal["split", "pad", "exact"] = "split",
 ):
     """Factory: returns Code2WavScheduler."""
     from sglang_omni.utils.device import resolve_concrete_device
 
+    if batch_graph_strategy not in ("split", "pad", "exact"):
+        raise ValueError(
+            f"Invalid Code2Wav batch graph strategy: {batch_graph_strategy}"
+        )
+    else:
+        pass
     if enable_cuda_graph and total_gpu_memory_fraction is None:
         raise ValueError(
             "Code2Wav device graph requires gpu_memory_fraction on the code2wav stage"
@@ -1234,6 +1262,7 @@ def create_code2wav_scheduler(
                 left_context_size,
                 min(max(int(batch_ceiling), 1), _DECOMPOSE_SIZES[0]),
                 initial_codec_chunk_frames,
+                batch_graph_strategy=batch_graph_strategy,
             )
         else:
             graph_keys = serial_threshold_graph_keys(
@@ -1276,4 +1305,5 @@ def create_code2wav_scheduler(
         enable_output_overlap=enable_output_overlap,
         enable_cuda_graph=enable_cuda_graph,
         cuda_graph_runner=cuda_graph_runner,
+        batch_graph_strategy=batch_graph_strategy,
     )

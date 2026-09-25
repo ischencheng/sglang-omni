@@ -640,7 +640,13 @@ class Code2WavCudaGraphRunner:
             )
         logger.warning("Code2Wav device graph runner disabled: %s", reason)
 
-    def run(self, codes: torch.Tensor, *, eligible: bool = True) -> Code2WavRunResult:
+    def run(
+        self,
+        codes: torch.Tensor,
+        *,
+        eligible: bool = True,
+        pad_batch: bool = False,
+    ) -> Code2WavRunResult:
         """Replay an exact graph or eagerly execute with a stable reason.
 
         Graph outputs are borrowed and valid only until the next graph replay;
@@ -664,12 +670,27 @@ class Code2WavCudaGraphRunner:
         self.validate_codes(codes)
         key = GraphKey(batch_size=int(codes.shape[0]), frames=int(codes.shape[2]))
         captured = self.graphs.get(key)
+        if captured is None and pad_batch:
+            for batch_size in reversed(self.available_batch_sizes(key.frames)):
+                if batch_size >= key.batch_size:
+                    key = GraphKey(batch_size=batch_size, frames=key.frames)
+                    captured = self.graphs[key]
+                    break
+                else:
+                    pass
+        else:
+            pass
         if captured is None:
             return self.eager(codes, key=key, reason="key_miss")
         else:
             pass
         try:
-            captured.static_input.copy_(codes)
+            batch_size = int(codes.shape[0])
+            if key.batch_size > batch_size:
+                captured.static_input[:batch_size].copy_(codes)
+                captured.static_input[batch_size:].zero_()
+            else:
+                captured.static_input.copy_(codes)
             captured.graph.replay()
         except Exception as exc:
             self.replay_failures += 1
@@ -679,7 +700,11 @@ class Code2WavCudaGraphRunner:
             raise
         self.graph_replays += 1
         return Code2WavRunResult(
-            output=captured.static_output,
+            output=(
+                captured.static_output[:batch_size]
+                if key.batch_size > batch_size
+                else captured.static_output
+            ),
             execution_mode="cuda_graph",
             key=key,
             fallback_reason=None,

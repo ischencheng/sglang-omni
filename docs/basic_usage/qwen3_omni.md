@@ -237,6 +237,36 @@ The feature derives the exact `B=1` threshold windows from
 `T{10,20,30,35}`. Unsupported shapes and final stream tails run eagerly.
 Capture-time incompatibilities also fall back to eager execution.
 
+Code2Wav request batching is disabled by default. With batching and CUDA Graphs
+enabled, `batch_graph_strategy` controls how a group uses the published graphs:
+
+- `split` (default) decomposes the group into available exact batch sizes.
+- `pad` splits groups at the largest available batch size, then pads a remainder
+  to the smallest available larger graph. Padding adds independent dummy rows
+  only along the batch axis, keeps the frame count unchanged, and discards dummy
+  outputs.
+- `exact` captures additional batch sizes up to `batch_ceiling`, subject to the
+  existing per-window limits and stage memory budget. This increases startup
+  capture work and can require more graph memory; if capture drops shapes, the
+  scheduler decomposes groups using the graphs that remain available.
+
+For example, opt into batch padding in your deployment config:
+
+```yaml
+stages:
+  code2wav:
+    factory:
+      enable_batching: true
+      enable_cuda_graph: true
+      batch_graph_strategy: pad
+```
+
+The equivalent launch overrides are
+`--code2wav.factory.enable_batching true`,
+`--code2wav.factory.enable_cuda_graph true`, and
+`--code2wav.factory.batch_graph_strategy pad`. Final stream tails still run
+eagerly under every strategy.
+
 Output overlap is also enabled by default on CUDA devices: each threshold
 window's waveform readback runs as an asynchronous device-to-host copy into a
 pinned staging buffer and is materialized while the GPU computes the next
