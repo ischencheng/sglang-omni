@@ -43,11 +43,14 @@ sgl-omni serve \
   --preprocessing.gpu 0 \
   --preprocessing.gpu_memory_fraction 0.10 \
   --tts_engine.gpu_memory_fraction 0.75 \
+  --tts_engine.engine.mem_fraction_static 0.60 \
   --vocoder.gpu_memory_fraction 0.10
 ```
 
-Choose budgets for your model, reference lengths, and GPU capacity. The
-preprocessing process loads an additional full DAC codec in FP32. Audio loading
+Choose budgets for your model, reference lengths, and GPU capacity. Stage
+fractions declare placement budgets; set the engine's
+`mem_fraction_static` separately to leave room for the reference codec and
+vocoder. The preprocessing process loads an additional full DAC codec in FP32. Audio loading
 and resampling remain on CPU, GPU encoding is serialized, and cached reference
 codes remain on CPU. CUDA preprocessing disables TF32 in its process. It can
 reduce latency for new references but competes with generation and vocoding
