@@ -41,7 +41,7 @@ from tests.unit_test.pipeline.helpers import make_stage
 
 
 @pytest.fixture(autouse=True)
-def _cuda_ipc_capable_platform(monkeypatch):
+def cuda_ipc_capable_platform(monkeypatch):
     """These stage tests assert the cuda_ipc transport contract on any host, so pin
     the policy that supplies it rather than the host's own platform.
     """
@@ -53,7 +53,7 @@ def _cuda_ipc_capable_platform(monkeypatch):
     )
 
 
-class _CloseAwareControlPlane(RecordingStageControlPlane):
+class CloseAwareControlPlane(RecordingStageControlPlane):
     async def recv(self):
         while not self.closed:
             await asyncio.sleep(0)
@@ -79,7 +79,7 @@ def test_aggregated_input_waits_per_request_without_cross_talk() -> None:
 def test_aggregated_input_supports_request_dynamic_source_sets() -> None:
     """Preserves early-arriving payloads while narrowing fan-in per request."""
 
-    def _expected_sources(request_id, from_stage, payload):
+    def expected_sources(request_id, from_stage, payload):
         del request_id
         if from_stage != "preprocess":
             return None
@@ -88,7 +88,7 @@ def test_aggregated_input_supports_request_dynamic_source_sets() -> None:
     handler = AggregatedInput(
         {"preprocess", "image", "audio"},
         lambda payloads: make_stage_payload(data={"sources": sorted(payloads)}),
-        expected_sources_fn=_expected_sources,
+        expected_sources_fn=expected_sources,
     )
 
     assert handler.receive("req-audio", "audio", make_stage_payload()) is None
@@ -108,14 +108,14 @@ def test_aggregated_input_supports_request_dynamic_source_sets() -> None:
 
 
 def test_aggregated_input_rejects_dynamic_sources_outside_static_fanin() -> None:
-    def _invalid_sources(request_id, from_stage, payload):
+    def invalid_sources(request_id, from_stage, payload):
         del request_id, from_stage, payload
         return ["preprocess", "audio"]
 
     handler = AggregatedInput(
         {"preprocess", "image"},
         lambda payloads: make_stage_payload(data={"sources": sorted(payloads)}),
-        expected_sources_fn=_invalid_sources,
+        expected_sources_fn=invalid_sources,
     )
 
     with pytest.raises(ValueError, match="outside static wait_for"):
@@ -129,7 +129,7 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
         platforms.current_platform, "device_type", "cuda", raising=False
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         scheduler = FakeScheduler()
         control_plane = RecordingStageControlPlane()
@@ -172,7 +172,7 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
         assert scheduler.aborted == ["req-1"]
         assert not stage_obj.stream_queue.has("req-1")
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_process_rejects_dynamic_targets_outside_static_topology() -> None:
@@ -251,11 +251,11 @@ def test_stage_process_accepts_iterable_dynamic_wait_sources() -> None:
 
 
 def test_stage_run_raises_when_scheduler_thread_crashes() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         scheduler = FakeScheduler(fail_start=RuntimeError("boom"))
         stage_obj = make_stage(
             scheduler=scheduler,
-            control_plane=_CloseAwareControlPlane(),
+            control_plane=CloseAwareControlPlane(),
         )
 
         with pytest.raises(RuntimeError, match="Scheduler thread"):
@@ -263,13 +263,13 @@ def test_stage_run_raises_when_scheduler_thread_crashes() -> None:
 
         assert scheduler.stopped is True
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_stop_waits_for_scheduler_model_path_terminalization(
     monkeypatch,
 ) -> None:
-    async def _run() -> None:
+    async def run() -> None:
         entered = threading.Event()
         release = threading.Event()
         stop_called = threading.Event()
@@ -320,13 +320,13 @@ def test_stage_stop_waits_for_scheduler_model_path_terminalization(
         assert scheduler.prefill_start_done == set()
         assert model_path_ends == [("req-active", "aborted")]
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
     monkeypatch, caplog
 ) -> None:
-    async def _run() -> None:
+    async def run() -> None:
         entered = threading.Event()
         release = threading.Event()
         scheduler = object.__new__(OmniScheduler)
@@ -368,13 +368,13 @@ def test_stage_stop_warns_but_succeeds_on_a_stuck_scheduler_thread(
             if stage_obj.scheduler_thread is not None:
                 await asyncio.to_thread(stage_obj.scheduler_thread.join, 1.0)
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_relay_payload_and_cross_gpu_stream_contracts() -> None:
     """Preserves tensor payload round-trips and stream control-before-wait ordering."""
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         payload = make_tensor_payload()
         data_ref, op = await stage_io.write_payload(
@@ -423,7 +423,7 @@ def test_relay_payload_and_cross_gpu_stream_contracts() -> None:
         assert stream_ref.metadata["token_id"] == 1
         assert [ref.path for ref in stream_ref.metadata_tensors] == ["hidden"]
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -630,7 +630,7 @@ def test_relay_payload_rejects_mismatched_transfer_length(length_delta: int) -> 
 @pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_cuda_payload_round_trip_preserves_cpu_tensor_devices() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay(device="cuda:0")
         payload = make_stage_payload(
             request_id="req-mixed-devices",
@@ -652,13 +652,13 @@ def test_cuda_payload_round_trip_preserves_cpu_tensor_devices() -> None:
         assert restored.data["grid"].device.type == "cpu"
         assert torch.equal(restored.data["grid"], torch.ones(1, dtype=torch.long))
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_relay_read_failure_completes_with_error() -> None:
     """Preserves failure reporting when a stage cannot read its relay payload."""
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         stage_obj = make_stage(
@@ -683,11 +683,11 @@ def test_stage_relay_read_failure_completes_with_error() -> None:
         assert "relay read failed" in control_plane.completions[0].error
         assert relay.cleaned[-1] == "req-1"
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_uses_dynamic_route_and_stream_done_targets() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         control_plane = RecordingStageControlPlane()
         stage_obj = make_stage(
             control_plane=control_plane,
@@ -714,7 +714,7 @@ def test_stage_uses_dynamic_route_and_stream_done_targets() -> None:
         assert isinstance(routed_msg, DataReadyMessage)
         assert not routed_msg.is_done
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
@@ -724,7 +724,7 @@ def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
         lambda **kwargs: events.append(kwargs),
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -757,7 +757,7 @@ def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
         assert queued.data is payload
         assert queued.data.data["tensor"] is tensor
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
     hop_events = [event for event in events if event["event_name"] == "stage_hop_sent"]
     assert hop_events == [
@@ -771,7 +771,7 @@ def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
 
 
 def test_stage_applies_projector_before_local_object_send() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(name="decode", scheduler=receiver_scheduler)
@@ -797,11 +797,11 @@ def test_stage_applies_projector_before_local_object_send() -> None:
             "data": {"answer": 7},
         }
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_local_object_preserves_fan_in_semantics() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(
@@ -857,11 +857,11 @@ def test_stage_local_object_preserves_fan_in_semantics() -> None:
             "thinker": {"t": 2},
         }
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_fan_out_payloads_materialize_when_local_object_is_unsafe() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
@@ -888,12 +888,12 @@ def test_stage_fan_out_payloads_materialize_when_local_object_is_unsafe() -> Non
         assert control_plane.sent_to_stage[0][2].chunk_id is None
         assert control_plane.sent_to_stage[1][2].chunk_id is None
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_payloads_use_local_object_when_isolated() -> None:
-    def _isolated_projector(marker):
-        def _project(payload):
+    def isolated_projector(marker):
+        def project(payload):
             return make_stage_payload(
                 request_id=payload.request_id,
                 inputs=payload.request.inputs,
@@ -901,9 +901,9 @@ def test_stage_projected_fan_out_payloads_use_local_object_when_isolated() -> No
                 data={"marker": marker, "data": dict(payload.data)},
             )
 
-        return _project
+        return project
 
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -921,8 +921,8 @@ def test_stage_projected_fan_out_payloads_use_local_object_when_isolated() -> No
             relay=relay,
             control_plane=control_plane,
             project_payload={
-                "decode": _isolated_projector("decode-only"),
-                "archive": _isolated_projector("archive-only"),
+                "decode": isolated_projector("decode-only"),
+                "archive": isolated_projector("archive-only"),
             },
             same_process_targets={"decode", "archive"},
             local_dispatcher=dispatcher,
@@ -947,11 +947,11 @@ def test_stage_projected_fan_out_payloads_use_local_object_when_isolated() -> No
             "data": {"answer": 7},
         }
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_requires_isolated_data_container() -> None:
-    def _shared_data_projector(payload):
+    def shared_data_projector(payload):
         return make_stage_payload(
             request_id=payload.request_id,
             inputs=payload.request.inputs,
@@ -959,7 +959,7 @@ def test_stage_projected_fan_out_requires_isolated_data_container() -> None:
             data=payload.data,
         )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
@@ -972,8 +972,8 @@ def test_stage_projected_fan_out_requires_isolated_data_container() -> None:
             relay=relay,
             control_plane=control_plane,
             project_payload={
-                "decode": _shared_data_projector,
-                "archive": _shared_data_projector,
+                "decode": shared_data_projector,
+                "archive": shared_data_projector,
             },
             same_process_targets={"decode", "archive"},
             local_dispatcher=LocalStageDispatcher(),
@@ -990,11 +990,11 @@ def test_stage_projected_fan_out_requires_isolated_data_container() -> None:
         ]
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_rejects_nested_mutable_aliases() -> None:
-    def _shallow_copy_projector(payload):
+    def shallow_copy_projector(payload):
         return make_stage_payload(
             request_id=payload.request_id,
             inputs=payload.request.inputs,
@@ -1002,7 +1002,7 @@ def test_stage_projected_fan_out_rejects_nested_mutable_aliases() -> None:
             data={"projected": dict(payload.data)},
         )
 
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -1018,8 +1018,8 @@ def test_stage_projected_fan_out_rejects_nested_mutable_aliases() -> None:
             relay=relay,
             control_plane=control_plane,
             project_payload={
-                "decode": _shallow_copy_projector,
-                "archive": _shallow_copy_projector,
+                "decode": shallow_copy_projector,
+                "archive": shallow_copy_projector,
             },
             same_process_targets={"decode", "archive"},
             local_dispatcher=dispatcher,
@@ -1040,11 +1040,11 @@ def test_stage_projected_fan_out_rejects_nested_mutable_aliases() -> None:
         ]
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_rejects_wrapped_original_data() -> None:
-    def _wrapped_data_projector(payload):
+    def wrapped_data_projector(payload):
         return make_stage_payload(
             request_id=payload.request_id,
             inputs=payload.request.inputs,
@@ -1052,7 +1052,7 @@ def test_stage_projected_fan_out_rejects_wrapped_original_data() -> None:
             data={"projected": payload.data},
         )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
@@ -1065,8 +1065,8 @@ def test_stage_projected_fan_out_rejects_wrapped_original_data() -> None:
             relay=relay,
             control_plane=control_plane,
             project_payload={
-                "decode": _wrapped_data_projector,
-                "archive": _wrapped_data_projector,
+                "decode": wrapped_data_projector,
+                "archive": wrapped_data_projector,
             },
             same_process_targets={"decode", "archive"},
             local_dispatcher=LocalStageDispatcher(),
@@ -1083,11 +1083,11 @@ def test_stage_projected_fan_out_rejects_wrapped_original_data() -> None:
         ]
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_allows_tensor_leaf_sharing() -> None:
-    def _tensor_leaf_projector(payload):
+    def tensor_leaf_projector(payload):
         return make_stage_payload(
             request_id=payload.request_id,
             inputs=payload.request.inputs,
@@ -1095,7 +1095,7 @@ def test_stage_projected_fan_out_allows_tensor_leaf_sharing() -> None:
             data={"tensor": payload.data["tensor"], "target_only": []},
         )
 
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -1107,7 +1107,7 @@ def test_stage_projected_fan_out_allows_tensor_leaf_sharing() -> None:
             endpoints={"decode": "inproc://decode"},
             relay=relay,
             control_plane=control_plane,
-            project_payload={"decode": _tensor_leaf_projector},
+            project_payload={"decode": tensor_leaf_projector},
             same_process_targets={"decode"},
             local_dispatcher=dispatcher,
         )
@@ -1127,15 +1127,15 @@ def test_stage_projected_fan_out_allows_tensor_leaf_sharing() -> None:
         queued = decode_scheduler.inbox.get_nowait()
         assert queued.data.data["tensor"] is tensor
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_projected_fan_out_requires_stage_payload_projection() -> None:
-    def _invalid_projector(payload):
+    def invalid_projector(payload):
         del payload
         return {"not": "a-stage-payload"}
 
-    async def _run() -> None:
+    async def run() -> None:
         sender = make_stage(
             name="thinker",
             get_next=lambda request_id, output: ["decode", "archive"],
@@ -1144,8 +1144,8 @@ def test_stage_projected_fan_out_requires_stage_payload_projection() -> None:
                 "archive": "inproc://archive",
             },
             project_payload={
-                "decode": _invalid_projector,
-                "archive": _invalid_projector,
+                "decode": invalid_projector,
+                "archive": invalid_projector,
             },
             same_process_targets={"decode", "archive"},
             local_dispatcher=LocalStageDispatcher(),
@@ -1160,7 +1160,7 @@ def test_stage_projected_fan_out_requires_stage_payload_projection() -> None:
                 make_stage_payload(request_id="req-fanout", data={"answer": 7}),
             )
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> None:
@@ -1170,7 +1170,7 @@ def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> N
         lambda **kwargs: events.append(kwargs),
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -1209,7 +1209,7 @@ def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> N
         assert queued.data.data is chunk
         assert queued.data.metadata is metadata
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
     receive_events = [
         event
@@ -1240,7 +1240,7 @@ def test_stage_sends_same_gpu_stream_chunk_as_direct_cuda_ipc(monkeypatch) -> No
         },
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1271,7 +1271,7 @@ def test_stage_sends_same_gpu_stream_chunk_as_direct_cuda_ipc(monkeypatch) -> No
         assert msg.data_ref["_type"] == "TorchCudaIpcStreamChunk"
         assert msg.chunk_id == 0
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_sends_same_gpu_cuda_payload_as_direct_cuda_ipc(monkeypatch) -> None:
@@ -1287,7 +1287,7 @@ def test_stage_sends_same_gpu_cuda_payload_as_direct_cuda_ipc(monkeypatch) -> No
         },
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1313,22 +1313,22 @@ def test_stage_sends_same_gpu_cuda_payload_as_direct_cuda_ipc(monkeypatch) -> No
         assert msg.data_ref["_type"] == "TorchCudaIpcPayload"
         assert msg.chunk_id is None
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_can_disable_same_gpu_direct_cuda_payload(monkeypatch) -> None:
     monkeypatch.setattr(stage_io, "payload_has_cuda_tensor", lambda payload: True)
 
-    def _unexpected_direct_payload(payload):
+    def unexpected_direct_payload(payload):
         raise AssertionError("direct payload serializer should not be called")
 
     monkeypatch.setattr(
         stage_io,
         "serialize_direct_cuda_ipc_payload",
-        _unexpected_direct_payload,
+        unexpected_direct_payload,
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1354,20 +1354,20 @@ def test_stage_can_disable_same_gpu_direct_cuda_payload(monkeypatch) -> None:
         assert msg.data_ref["_type"] == "DataRef"
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_uses_relay_when_direct_cuda_payload_is_reexported(monkeypatch) -> None:
     monkeypatch.setattr(stage_io, "payload_has_cuda_tensor", lambda payload: True)
 
-    def _raise_reexport(payload):
+    def raise_reexport(payload):
         raise RuntimeError(
             "Attempted to send CUDA tensor received from another process"
         )
 
-    monkeypatch.setattr(stage_io, "serialize_direct_cuda_ipc_payload", _raise_reexport)
+    monkeypatch.setattr(stage_io, "serialize_direct_cuda_ipc_payload", raise_reexport)
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1392,7 +1392,7 @@ def test_stage_uses_relay_when_direct_cuda_payload_is_reexported(monkeypatch) ->
         assert msg.data_ref["_type"] == "DataRef"
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_receives_same_gpu_direct_cuda_ipc_payload(monkeypatch) -> None:
@@ -1403,7 +1403,7 @@ def test_stage_receives_same_gpu_direct_cuda_ipc_payload(monkeypatch) -> None:
         lambda data_ref: payload,
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         control_plane = RecordingStageControlPlane()
         scheduler = FakeScheduler()
         receiver = make_stage(
@@ -1431,7 +1431,7 @@ def test_stage_receives_same_gpu_direct_cuda_ipc_payload(monkeypatch) -> None:
         assert queued.data is payload
         assert control_plane.sent_to_stage == []
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 @pytest.mark.accelerator
@@ -1489,7 +1489,7 @@ def test_direct_cuda_ipc_payload_rejects_request_tensors() -> None:
 
 
 def test_stage_sends_same_process_stream_done_and_final_payload_locally() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -1523,11 +1523,11 @@ def test_stage_sends_same_process_stream_done_and_final_payload_locally() -> Non
         assert full_payload.type == "new_request"
         assert full_payload.data is payload
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_allows_local_payload_when_static_stream_target_is_inactive() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
@@ -1555,11 +1555,11 @@ def test_stage_allows_local_payload_when_static_stream_target_is_inactive() -> N
         assert queued.type == "new_request"
         assert queued.data is payload
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_preserves_relay_order_when_target_also_receives_stream() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
@@ -1583,11 +1583,11 @@ def test_stage_preserves_relay_order_when_target_also_receives_stream() -> None:
         assert control_plane.sent_to_stage[1][2].chunk_id is None
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_payload_send_requires_endpoint() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         sender = make_stage(name="thinker", endpoints={})
 
         with pytest.raises(RuntimeError, match="no endpoint configured"):
@@ -1597,11 +1597,11 @@ def test_stage_payload_send_requires_endpoint() -> None:
                 make_stage_payload(request_id="req-1"),
             )
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_stage_local_object_requires_registered_target() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         sender = make_stage(
             name="thinker",
             endpoints={"decode": "inproc://decode"},
@@ -1617,11 +1617,11 @@ def test_stage_local_object_requires_registered_target() -> None:
                 allow_local_object=True,
             )
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_local_dispatch_propagates_replica_bindings_to_receiver() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         dispatcher = LocalStageDispatcher()
         receiver = make_stage(
             name="thinker",
@@ -1647,7 +1647,7 @@ def test_local_dispatch_propagates_replica_bindings_to_receiver() -> None:
         assert receiver.replica_bindings["req-local"] == {"decode": 1}
         assert receiver.resolve_target_instance("req-local", "decode") == "decode@r1"
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_resolve_target_instance_without_binding_raises() -> None:
@@ -1660,7 +1660,7 @@ def test_resolve_target_instance_without_binding_raises() -> None:
 
 
 def test_completed_request_id_can_record_new_replica_bindings() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         stage = make_stage(
             name="thinker",
             replica_topology={"decode": ["decode@r0", "decode@r1"]},
@@ -1679,7 +1679,7 @@ def test_completed_request_id_can_record_new_replica_bindings() -> None:
         assert stage.replica_bindings["req-1"] == {"decode": 1}
         assert stage.resolve_target_instance("req-1", "decode") == "decode@r1"
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def test_replica_bindings_not_recorded_after_abort() -> None:
@@ -1697,14 +1697,14 @@ def test_replica_bindings_not_recorded_after_abort() -> None:
 def test_stage_routes_audio_cuda_payload_over_relay_when_direct_is_disabled(
     monkeypatch,
 ) -> None:
-    def _unexpected_direct_payload(payload):
+    def unexpected_direct_payload(payload):
         raise AssertionError("small payload must not take the direct CUDA IPC path")
 
     monkeypatch.setattr(
-        stage_io, "serialize_direct_cuda_ipc_payload", _unexpected_direct_payload
+        stage_io, "serialize_direct_cuda_ipc_payload", unexpected_direct_payload
     )
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1731,13 +1731,13 @@ def test_stage_routes_audio_cuda_payload_over_relay_when_direct_is_disabled(
         assert msg.data_ref["_type"] == "DataRef"
         assert relay.storage
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 @pytest.mark.accelerator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_unrelated_stage_still_uses_direct_ipc_for_small_cuda_payload() -> None:
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1761,7 +1761,7 @@ def test_unrelated_stage_still_uses_direct_ipc_for_small_cuda_payload() -> None:
         _, _, msg = control_plane.sent_to_stage[0]
         assert msg.data_ref["_type"] == "TorchCudaIpcPayload"
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 @pytest.mark.accelerator
@@ -1769,7 +1769,7 @@ def test_unrelated_stage_still_uses_direct_ipc_for_small_cuda_payload() -> None:
 def test_small_cuda_payload_survives_the_relay_route_bitwise() -> None:
     """The scoped audio policy changes transport only; values stay untouched."""
 
-    async def _run() -> None:
+    async def run() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
@@ -1807,4 +1807,4 @@ def test_small_cuda_payload_survives_the_relay_route_bitwise() -> None:
         # the sender-side tensor must also be left alone
         assert torch.equal(tensor, original)
 
-    asyncio.run(_run())
+    asyncio.run(run())
