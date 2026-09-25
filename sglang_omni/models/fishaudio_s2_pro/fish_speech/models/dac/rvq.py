@@ -356,13 +356,17 @@ class DownsampleResidualVectorQuantize(nn.Module):
 
         return results
 
-    # def encode(self, z):
-    #     z = self.downsample(z)
-    #     z = self.pre_module(z)
-    #     _, indices, _, _, _ = self.quantizer(z.mT)
-    #     indices = rearrange(indices, "g b l r -> b (g r) l")
-    #     return indices
-    #
+    def encode_codes(
+        self, z: torch.Tensor, n_quantizers: int | None = None
+    ) -> torch.Tensor:
+        """Return semantic and residual codes without reconstructing latents."""
+        z = self.downsample(z)
+        z = self.pre_module(z)
+        semantic_z, semantic_codes, _, _, _ = self.semantic_quantizer(z)
+        residual_z = z - semantic_z
+        _, codes, _, _, _ = self.quantizer(residual_z, n_quantizers=n_quantizers)
+        return torch.cat([semantic_codes, codes], dim=1)
+
     def decode(self, indices: torch.Tensor):
         # indices = rearrange(indices, "b (g r) l -> g b l r", g=self.residual_fsq.groups)
         indices[:, 0] = torch.clamp(
