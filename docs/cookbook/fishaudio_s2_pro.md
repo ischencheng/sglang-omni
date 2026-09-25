@@ -31,6 +31,28 @@ sgl-omni serve \
   --port 8000
 ```
 
+Reference audio encoding runs on CPU by default. To use CUDA for uncached
+references, place the preprocessing stage on a GPU. Keep its separate
+preprocessing process and declare memory budgets for every stage sharing that
+GPU. For example, on an 80 GB GPU:
+
+```bash
+sgl-omni serve \
+  --model-path fishaudio/s2-pro \
+  --config examples/configs/s2pro_tts.yaml \
+  --preprocessing.gpu 0 \
+  --preprocessing.gpu_memory_fraction 0.10 \
+  --tts_engine.gpu_memory_fraction 0.75 \
+  --vocoder.gpu_memory_fraction 0.10
+```
+
+Choose budgets for your model, reference lengths, and GPU capacity. The
+preprocessing process loads an additional full DAC codec in FP32. Audio loading
+and resampling remain on CPU, GPU encoding is serialized, and cached reference
+codes remain on CPU. CUDA preprocessing disables TF32 in its process. It can
+reduce latency for new references but competes with generation and vocoding
+when they share a GPU; repeated references already use the encoding cache.
+
 ## Synthesize Speech
 
 Plain TTS:
