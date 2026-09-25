@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import contextlib
+import gc
+import queue
 import threading
 import time
+import weakref
 from collections.abc import Iterator
+from concurrent.futures import Future
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 import torch
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 
+from sglang_omni.models.qwen3_asr.deferred_cache import (
+    CachePublication as DeferredPublication,
+)
+from sglang_omni.models.qwen3_asr.deferred_cache import DeferredEmbeddingCache
 from sglang_omni.models.qwen3_asr.encoder_service import (
     Qwen3ASRPreLMEncoderService,
     build_cache_namespace,
     expected_audio_tokens,
 )
+from sglang_omni.scheduling.stage_cache import StageOutputCache
 
 _HIDDEN_SIZE = 4
 if torch.cuda.is_available():
@@ -100,6 +110,7 @@ def _make_service(
     cache_max_entries: int = 16,
     cache_max_bytes: int = 1 << 20,
     max_batch_size: int = 8,
+    defer_cache_copy: bool = False,
 ) -> Qwen3ASRPreLMEncoderService:
     service = Qwen3ASRPreLMEncoderService(
         model or _StubModel(),
@@ -107,6 +118,9 @@ def _make_service(
         cache_max_entries=cache_max_entries,
         cache_max_bytes=cache_max_bytes,
         max_batch_size=max_batch_size,
+        defer_cache_copy=defer_cache_copy,
+        cache_pending_max_entries=8,
+        cache_pending_max_bytes=1 << 20,
     )
     _SERVICES.append(service)
     return service
@@ -127,6 +141,417 @@ def _item(
             "num_audio_tokens": num_audio_tokens,
         },
     )
+
+
+@dataclass(kw_only=True)
+class CachePublication:
+    key: str
+    embedding: torch.Tensor
+    completion: Future[None]
+
+
+class ControlledDeferredCache:
+    def __init__(self, cache: StageOutputCache) -> None:
+        self.cache = cache
+        self.max_pending_bytes = 1 << 20
+        self.submitted: queue.Queue[CachePublication] = queue.Queue()
+        self.publications: list[CachePublication] = []
+        self.submit_gate = threading.Event()
+        self.submit_gate.set()
+        self.close_gate = threading.Event()
+        self.close_gate.set()
+        self.close_started = threading.Event()
+        self.publish_during_submit = False
+
+    def submit(
+        self, key: str, embedding: torch.Tensor, completion: Future[None]
+    ) -> None:
+        publication = CachePublication(
+            key=key, embedding=embedding.detach().clone(), completion=completion
+        )
+        self.publications.append(publication)
+        if self.publish_during_submit:
+            self.publish(publication)
+        else:
+            pass
+        self.submitted.put(publication)
+        assert self.submit_gate.wait(timeout=10)
+
+    def publish(self, publication: CachePublication) -> None:
+        self.cache.put(publication.key, publication.embedding)
+        publication.completion.set_result(None)
+
+    def close(self) -> None:
+        self.close_started.set()
+        assert self.close_gate.wait(timeout=10)
+        for publication in self.publications:
+            if not publication.completion.done():
+                self.publish(publication)
+            else:
+                pass
+
+    def stats(self) -> dict[str, int]:
+        return {}
+
+
+class FakeCopyStream:
+    def __init__(self, device: torch.device) -> None:
+        self.device = device
+
+
+def test_deferred_cache_opt_in_preserves_synchronous_cpu_cache() -> None:
+    service = _make_service(defer_cache_copy=True)
+    audio_item = _item(123, 3)
+
+    service.submit_item(audio_item).result(timeout=2)
+
+    assert service.deferred_cache is None
+    assert torch.equal(
+        service.lookup_cached_embedding("123", 3), audio_item.precomputed_embeddings
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_entries", "max_bytes"), [(1, 1 << 20), (8, 3 * _HIDDEN_SIZE * 4)]
+)
+def test_deferred_cache_bounds_include_active_publication(
+    monkeypatch: pytest.MonkeyPatch, max_entries: int, max_bytes: int
+) -> None:
+    monkeypatch.setattr(torch.cuda, "Stream", FakeCopyStream)
+    cache = StageOutputCache(cache_device="cpu")
+    publisher = DeferredEmbeddingCache(
+        cache,
+        device=torch.device("cpu"),
+        max_pending_entries=max_entries,
+        max_pending_bytes=max_bytes,
+    )
+    publication_started = threading.Event()
+    release_publication = threading.Event()
+    second_started = threading.Event()
+    second_accepted = threading.Event()
+    embedding = torch.ones(3, _HIDDEN_SIZE)
+    first_completion: Future[None] = Future()
+    second_completion: Future[None] = Future()
+
+    def controlled_publish(publication: DeferredPublication) -> None:
+        publication_started.set()
+        assert release_publication.wait(timeout=10)
+        cache.put(publication.key, publication.embedding)
+
+    def submit_second() -> None:
+        second_started.set()
+        publisher.submit("second", embedding, second_completion)
+        second_accepted.set()
+
+    monkeypatch.setattr(publisher, "publish", controlled_publish)
+    submit_thread = threading.Thread(target=submit_second)
+    try:
+        publisher.submit("first", embedding, first_completion)
+        assert publication_started.wait(timeout=2)
+        submit_thread.start()
+        assert second_started.wait(timeout=2)
+        assert not second_accepted.wait(timeout=0.05)
+        stats = publisher.stats()
+        assert stats["cache_pending_entries"] == 1
+        assert (
+            stats["cache_pending_bytes"] == embedding.numel() * embedding.element_size()
+        )
+        assert cache.get("first") is None
+        assert not first_completion.done()
+
+        release_publication.set()
+        first_completion.result(timeout=2)
+        second_completion.result(timeout=2)
+        submit_thread.join(timeout=2)
+        assert second_accepted.is_set()
+        assert torch.equal(cache.get("first"), embedding)
+        assert torch.equal(cache.get("second"), embedding)
+        publisher.close()
+        assert publisher.stats()["cache_pending_entries"] == 0
+        assert publisher.stats()["cache_pending_bytes"] == 0
+    finally:
+        release_publication.set()
+        if submit_thread.ident is not None:
+            submit_thread.join(timeout=2)
+        else:
+            pass
+        publisher.close()
+
+
+def test_deferred_cache_close_rejects_blocked_submit_and_drains_active_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "Stream", FakeCopyStream)
+    cache = StageOutputCache(cache_device="cpu")
+    publisher = DeferredEmbeddingCache(
+        cache, device=torch.device("cpu"), max_pending_entries=1, max_pending_bytes=1024
+    )
+    publication_started = threading.Event()
+    release_publication = threading.Event()
+    submit_started = threading.Event()
+    submit_rejected = threading.Event()
+    embedding = torch.ones(3, _HIDDEN_SIZE)
+    completion: Future[None] = Future()
+
+    def controlled_publish(publication: DeferredPublication) -> None:
+        publication_started.set()
+        assert release_publication.wait(timeout=10)
+        cache.put(publication.key, publication.embedding)
+
+    def submit_second() -> None:
+        submit_started.set()
+        with pytest.raises(RuntimeError, match="closed"):
+            publisher.submit("second", embedding, Future())
+        submit_rejected.set()
+
+    monkeypatch.setattr(publisher, "publish", controlled_publish)
+    submit_thread = threading.Thread(target=submit_second)
+    close_thread = threading.Thread(target=publisher.close)
+    try:
+        publisher.submit("first", embedding, completion)
+        assert publication_started.wait(timeout=2)
+        submit_thread.start()
+        assert submit_started.wait(timeout=2)
+        close_thread.start()
+        assert submit_rejected.wait(timeout=2)
+        assert close_thread.is_alive()
+        assert not completion.done()
+        release_publication.set()
+        close_thread.join(timeout=2)
+        assert not close_thread.is_alive()
+        completion.result(timeout=2)
+        assert torch.equal(cache.get("first"), embedding)
+        assert cache.get("second") is None
+    finally:
+        release_publication.set()
+        if submit_thread.ident is not None:
+            submit_thread.join(timeout=2)
+        else:
+            pass
+        if close_thread.ident is not None:
+            close_thread.join(timeout=2)
+        else:
+            pass
+        publisher.close()
+
+
+@pytest.mark.parametrize("cache_max_entries", [0, 16])
+def test_deferred_cache_disabled_or_oversized_fallback_does_not_queue(
+    cache_max_entries: int,
+) -> None:
+    model = _StubModel()
+    model.encode_gate = threading.Event()
+    encode_gate = model.encode_gate
+    service = _make_service(model, cache_max_entries=cache_max_entries)
+    publisher = ControlledDeferredCache(service.cache)
+    publisher.max_pending_bytes = 1
+    service.deferred_cache = publisher
+
+    first = service.submit_item(_item(123, 3))
+    duplicate = service.submit_item(_item(123, 3))
+    encode_gate.set()
+    first.result(timeout=2)
+    duplicate.result(timeout=2)
+    assert model.encode_calls == 1
+    assert publisher.submitted.empty()
+
+    service.submit_item(_item(123, 3)).result(timeout=2)
+    assert model.encode_calls == (2 if cache_max_entries == 0 else 1)
+    assert len(service.cache) == (0 if cache_max_entries == 0 else 1)
+
+
+def test_pending_cache_publication_does_not_delay_lm_or_duplicate_requests() -> None:
+    model = _StubModel()
+    model.encode_gate = threading.Event()
+    encode_gate = model.encode_gate
+    service = _make_service(model)
+    publisher = ControlledDeferredCache(service.cache)
+    service.deferred_cache = publisher
+    leader, follower, late_follower = [_item(123, 3) for _ in range(3)]
+
+    leader_future = service.submit_item(leader)
+    follower_future = service.submit_item(follower)
+    encode_gate.set()
+    publication = publisher.submitted.get(timeout=2)
+    leader_future.result(timeout=2)
+    follower_future.result(timeout=2)
+
+    assert not publication.completion.done()
+    assert service.lookup_cached_embedding("123", 3) is None
+    service.submit_item(late_follower).result(timeout=2)
+    assert model.encode_calls == 1
+    for audio_item in (leader, follower, late_follower):
+        assert torch.equal(audio_item.precomputed_embeddings, publication.embedding)
+        assert audio_item.feature is None
+
+    publisher.publish(publication)
+    assert torch.equal(service.lookup_cached_embedding("123", 3), publication.embedding)
+    service.submit_item(_item(123, 3)).result(timeout=2)
+    assert model.encode_calls == 1
+
+
+def test_publication_before_lm_completion_preserves_single_flight() -> None:
+    model = _StubModel()
+    service = _make_service(model)
+    publisher = ControlledDeferredCache(service.cache)
+    publisher.publish_during_submit = True
+    publisher.submit_gate.clear()
+    service.deferred_cache = publisher
+
+    try:
+        leader_future = service.submit_item(_item(123, 3))
+        publication = publisher.submitted.get(timeout=2)
+        assert publication.completion.done()
+        assert not leader_future.done()
+        service.cache.clear()
+        follower_future = service.submit_item(_item(123, 3))
+        publisher.submit_gate.set()
+        leader_future.result(timeout=2)
+        follower_future.result(timeout=2)
+        assert model.encode_calls == 1
+
+        service.submit_item(_item(123, 3)).result(timeout=2)
+        assert model.encode_calls == 2
+    finally:
+        publisher.submit_gate.set()
+
+
+def test_cache_publication_failure_keeps_lm_result_and_allows_retry() -> None:
+    model = _StubModel()
+    service = _make_service(model)
+    publisher = ControlledDeferredCache(service.cache)
+    service.deferred_cache = publisher
+    first_item = _item(123, 3)
+
+    first_future = service.submit_item(first_item)
+    publication = publisher.submitted.get(timeout=2)
+    embedding = first_future.result(timeout=2)
+    publication.completion.set_exception(RuntimeError("cache publication failed"))
+
+    assert first_future.result() is embedding
+    assert torch.equal(first_item.precomputed_embeddings, embedding)
+    assert service.lookup_cached_embedding("123", 3) is None
+
+    retry_item = _item(123, 3)
+    service.submit_item(retry_item).result(timeout=2)
+    assert model.encode_calls == 2
+    retry_publication = publisher.submitted.get(timeout=2)
+    publisher.publish(retry_publication)
+    assert torch.equal(
+        service.lookup_cached_embedding("123", 3), retry_item.precomputed_embeddings
+    )
+
+
+def test_batch_retry_reuses_an_already_pending_cache_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _StubModel()
+    model.encode_gate = threading.Event()
+    model.encode_started = threading.Event()
+    encode_gate = model.encode_gate
+    service = _make_service(model)
+    publisher = ControlledDeferredCache(service.cache)
+    publisher.max_pending_bytes = 3 * _HIDDEN_SIZE * 4
+    service.deferred_cache = publisher
+    deferred_item = _item(123, 3)
+    oversized_item = _item(456, 5)
+    oversized_key = service.cache_key(oversized_item)
+    original_put = service.cache.put
+    failed_once = False
+
+    def fail_first_oversized_copy(key: str | None, embedding: torch.Tensor) -> None:
+        nonlocal failed_once
+        if key == oversized_key and not failed_once:
+            failed_once = True
+            raise RuntimeError("synchronous cache publication failed")
+        else:
+            original_put(key, embedding)
+
+    monkeypatch.setattr(service.cache, "put", fail_first_oversized_copy)
+    initial_future = service.submit_item(_item(1, 3))
+    assert model.encode_started.wait(timeout=2)
+    deferred_future = service.submit_item(deferred_item)
+    oversized_future = service.submit_item(oversized_item)
+    encode_gate.set()
+    for completion in (initial_future, deferred_future, oversized_future):
+        completion.result(timeout=2)
+
+    assert failed_once
+    assert model.encode_batch_sizes == [1, 2, 1, 1]
+    deferred_key = service.cache_key(deferred_item)
+    assert sum(record.key == deferred_key for record in publisher.publications) == 1
+    for publication in publisher.publications:
+        publisher.publish(publication)
+    assert torch.equal(
+        service.lookup_cached_embedding("123", 3), deferred_item.precomputed_embeddings
+    )
+    assert torch.equal(
+        service.lookup_cached_embedding("456", 5), oversized_item.precomputed_embeddings
+    )
+
+
+def test_cancelled_request_futures_leave_shared_encode_and_cache_usable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = _StubModel()
+    model.encode_gate = threading.Event()
+    encode_gate = model.encode_gate
+    service = _make_service(model)
+    publisher = ControlledDeferredCache(service.cache)
+    service.deferred_cache = publisher
+
+    leader_future = service.submit_item(_item(123, 3))
+    follower_future = service.submit_item(_item(123, 3))
+    survivor = _item(123, 3)
+    survivor_future = service.submit_item(survivor)
+    assert leader_future.cancel()
+    assert follower_future.cancel()
+    encode_gate.set()
+    survivor_future.result(timeout=2)
+    publication = publisher.submitted.get(timeout=2)
+    publisher.publish(publication)
+
+    assert model.encode_calls == 1
+    assert leader_future.cancelled()
+    assert follower_future.cancelled()
+    assert not survivor_future.cancel()
+    assert torch.equal(
+        service.lookup_cached_embedding("123", 3), survivor.precomputed_embeddings
+    )
+    service.submit_item(_item(456, 3)).result(timeout=2)
+    assert model.encode_calls == 2
+    assert "exception calling callback" not in caplog.text
+
+
+def test_close_drains_cache_publication_and_rejects_all_new_requests() -> None:
+    service = _make_service()
+    publisher = ControlledDeferredCache(service.cache)
+    publisher.close_gate.clear()
+    service.deferred_cache = publisher
+    service.submit_item(_item(123, 3)).result(timeout=2)
+    publication = publisher.submitted.get(timeout=2)
+    service.cache.put(service.cache_key(_item(456, 3)), torch.ones(3, _HIDDEN_SIZE))
+    close_thread = threading.Thread(target=service.close)
+
+    try:
+        close_thread.start()
+        assert publisher.close_started.wait(timeout=2)
+        assert close_thread.is_alive()
+        assert not service.thread.is_alive()
+        assert not publication.completion.done()
+        for audio_hash in (123, 456, 789):
+            with pytest.raises(RuntimeError, match="closed"):
+                service.submit_item(_item(audio_hash, 3))
+        publisher.close_gate.set()
+        close_thread.join(timeout=2)
+        assert not close_thread.is_alive()
+        assert publication.completion.done()
+        assert torch.equal(
+            service.lookup_cached_embedding("123", 3), publication.embedding
+        )
+    finally:
+        publisher.close_gate.set()
+        close_thread.join(timeout=2)
 
 
 def test_encode_attaches_lm_ready_embedding_and_clears_feature() -> None:
@@ -680,6 +1105,66 @@ def test_flat_2d_encoder_output_is_also_accepted() -> None:
     service.encode_item(item)
 
     assert item.precomputed_embeddings.shape == (3, _HIDDEN_SIZE)
+
+
+@pytest.mark.accelerator
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_deferred_cache_cuda_copy_retains_source_until_complete(
+    monkeypatch: pytest.MonkeyPatch, dtype: torch.dtype
+) -> None:
+    device = torch.device("cuda", torch.cuda.current_device())
+    cache = StageOutputCache(cache_device="cpu")
+    publisher = DeferredEmbeddingCache(
+        cache,
+        device=device,
+        max_pending_entries=2,
+        max_pending_bytes=4 << 20,
+    )
+    producer_stream = torch.cuda.Stream(device=device)
+    publication_started = threading.Event()
+    release_publication = threading.Event()
+    original_publish = publisher.publish
+    completion: Future[None] = Future()
+
+    def controlled_publish(publication: DeferredPublication) -> Exception | None:
+        publication_started.set()
+        assert release_publication.wait(timeout=10)
+        return original_publish(publication)
+
+    monkeypatch.setattr(publisher, "publish", controlled_publish)
+    try:
+        with torch.cuda.stream(producer_stream):
+            embedding = (
+                torch.arange(513 * 1024, device=device).remainder(251).to(dtype)
+            ).reshape(513, 1024)
+        producer_stream.synchronize()
+        expected = embedding.cpu()
+        source_reference = weakref.ref(embedding)
+        publisher.submit("audio", embedding, completion)
+        assert publication_started.wait(timeout=2)
+        del embedding
+        gc.collect()
+
+        assert source_reference() is not None
+        assert cache.get("audio") is None
+        assert not completion.done()
+        with torch.cuda.stream(producer_stream):
+            scratch = torch.empty(513, 1024, dtype=dtype, device=device)
+            scratch.fill_(99)
+        release_publication.set()
+        completion.result(timeout=10)
+        cached = cache.get("audio")
+        assert cached.device.type == "cpu"
+        assert cached.is_pinned()
+        assert torch.equal(cached, expected)
+        publisher.close()
+        gc.collect()
+        assert source_reference() is None
+        assert publisher.stats()["cache_pending_bytes"] == 0
+    finally:
+        release_publication.set()
+        publisher.close()
 
 
 @pytest.mark.accelerator

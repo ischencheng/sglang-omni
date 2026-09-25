@@ -489,6 +489,34 @@ sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
 
 - Corpus WER stayed 0.0122 for every configuration at every level.
 
+### Deferred encoder cache copies
+
+On CUDA, `asr.factory.pre_lm_cache_deferred_copy` opts into publishing the
+CPU embedding cache from a separate copy worker. A cache miss can enter LM
+admission once its GPU embedding is ready, while its CPU copy is still in
+progress. Concurrent requests for that audio share the ready GPU embedding
+until the CPU entry is published. Completed cache hits still skip mel extraction.
+The option defaults to `false`; CPU and NPU retain synchronous caching.
+
+```bash
+sgl-omni serve --model-path Qwen/Qwen3-ASR-1.7B \
+  --asr.factory.pre_lm_cache_deferred_copy true
+```
+
+`pre_lm_cache_pending_max_entries` (8) and
+`pre_lm_cache_pending_max_bytes` (64 MiB) bound queued and active cache copies.
+The copy worker retains GPU source tensors and publishes only completed CPU
+tensors. When the queue reaches either limit, encoding waits for capacity;
+an entry exceeding the pending byte limit uses a synchronous copy. The existing
+CPU LRU entry and byte limits still apply. Cache-copy failures are logged and
+counted without invalidating an embedding already delivered to the LM.
+Shutdown drains the encoder and then the cache-copy worker.
+
+Evaluate new-audio misses, prewarmed hits, and mixed traffic separately before
+enabling this option. Measure admission latency and end-to-end latency along
+with throughput and retained memory; moving a cache copy does not guarantee
+an end-to-end improvement.
+
 ## Known Limitations
 
 - The HTTP endpoint accepts one uploaded file per request. Live PCM uses

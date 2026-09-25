@@ -23,7 +23,10 @@ import sglang_omni.utils.device as device_utils
 from sglang_omni.config.manager import ConfigManager
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.models.qwen3_asr import request_builders
-from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
+from sglang_omni.models.qwen3_asr.config import (
+    Qwen3ASRFactoryArgs,
+    Qwen3ASRPipelineConfig,
+)
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
 from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
 from sglang_omni.scheduling.generation_batch_policy import (
@@ -314,6 +317,9 @@ def test_qwen3_asr_config_uses_batched_stage_with_64_running_requests() -> None:
     assert stage.factory.enable_pre_lm_encoder is True
     assert stage.factory.pre_lm_cache_max_entries == 4096
     assert stage.factory.pre_lm_cache_size_bytes == 2 * 1024**3
+    assert stage.factory.pre_lm_cache_deferred_copy is False
+    assert stage.factory.pre_lm_cache_pending_max_entries == 8
+    assert stage.factory.pre_lm_cache_pending_max_bytes == 64 * 1024**2
     assert stage.factory.pre_lm_max_batch_size == 8
     assert stage.factory.pre_lm_max_batch_wait_ms == 0
     assert type(config).stage_config_cls("asr").engine_stage
@@ -357,6 +363,14 @@ def test_qwen3_asr_stage_default_enables_pre_lm_encoder() -> None:
     assert signature.parameters["pre_lm_cache_size_bytes"].default == 2 * 1024**3
     assert signature.parameters["pre_lm_max_batch_size"].default == 8
     assert signature.parameters["pre_lm_max_batch_wait_ms"].default == 0
+
+
+@pytest.mark.parametrize(
+    "field", ["pre_lm_cache_pending_max_entries", "pre_lm_cache_pending_max_bytes"]
+)
+def test_qwen3_asr_config_rejects_nonpositive_cache_pending_limits(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        Qwen3ASRFactoryArgs(**{field: 0})
 
 
 @pytest.mark.parametrize(
@@ -596,6 +610,24 @@ def test_qwen3_asr_threads_explicit_cuda_graph_bs(monkeypatch, caplog) -> None:
     assert recorded.stream_builder_calls == [
         {"tokenizer": recorded.tokenizer, "min_emit_interval_s": 0.125}
     ]
+
+
+@pytest.mark.parametrize("deferred_copy", [False, True])
+def test_qwen3_asr_forwards_explicit_cache_publication_options(
+    monkeypatch: pytest.MonkeyPatch, deferred_copy: bool
+) -> None:
+    recorded = _patch_engine_dependencies(monkeypatch)
+
+    create_sglang_qwen3_asr_executor(
+        "dummy",
+        pre_lm_cache_deferred_copy=deferred_copy,
+        pre_lm_cache_pending_max_entries=3,
+        pre_lm_cache_pending_max_bytes=12 * 1024**2,
+    )
+
+    assert recorded.encoder_service_kwargs["defer_cache_copy"] is deferred_copy
+    assert recorded.encoder_service_kwargs["cache_pending_max_entries"] == 3
+    assert recorded.encoder_service_kwargs["cache_pending_max_bytes"] == 12 * 1024**2
 
 
 def test_qwen3_asr_prefill_ladder_is_accepted_by_the_shared_policy(caplog) -> None:

@@ -59,6 +59,9 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         enable_pre_lm_encoder: bool = True,
         pre_lm_cache_max_entries: int = 4096,
         pre_lm_cache_size_bytes: int = 2 * 1024**3,
+        pre_lm_cache_deferred_copy: bool | None = None,
+        pre_lm_cache_pending_max_entries: int | None = None,
+        pre_lm_cache_pending_max_bytes: int | None = None,
         pre_lm_max_batch_size: int = 8,
         pre_lm_max_batch_wait_ms: int = 0,
         enable_encoder_cuda_graph: bool = True,
@@ -104,6 +107,9 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
         self.enable_pre_lm_encoder = enable_pre_lm_encoder
         self.pre_lm_cache_max_entries = pre_lm_cache_max_entries
         self.pre_lm_cache_size_bytes = pre_lm_cache_size_bytes
+        self.pre_lm_cache_deferred_copy = pre_lm_cache_deferred_copy
+        self.pre_lm_cache_pending_max_entries = pre_lm_cache_pending_max_entries
+        self.pre_lm_cache_pending_max_bytes = pre_lm_cache_pending_max_bytes
         self.pre_lm_max_batch_size = pre_lm_max_batch_size
         self.pre_lm_max_batch_wait_ms = pre_lm_max_batch_wait_ms
         self.enable_encoder_cuda_graph = enable_encoder_cuda_graph
@@ -406,6 +412,9 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder):
                 ),
                 cache_max_entries=self.pre_lm_cache_max_entries,
                 cache_max_bytes=self.pre_lm_cache_size_bytes,
+                defer_cache_copy=bool(self.pre_lm_cache_deferred_copy),
+                cache_pending_max_entries=self.pre_lm_cache_pending_max_entries,
+                cache_pending_max_bytes=self.pre_lm_cache_pending_max_bytes,
                 max_batch_size=self.pre_lm_max_batch_size,
                 max_batch_wait_ms=self.pre_lm_max_batch_wait_ms,
             )

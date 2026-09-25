@@ -39,6 +39,9 @@ class Qwen3ASRFactoryArgs(FactoryArgs):
     enable_pre_lm_encoder: bool | None = None
     pre_lm_cache_max_entries: int | None = Field(default=None, ge=1)
     pre_lm_cache_size_bytes: int | None = Field(default=None, ge=1)
+    pre_lm_cache_deferred_copy: bool | None = None
+    pre_lm_cache_pending_max_entries: int | None = Field(default=None, ge=1)
+    pre_lm_cache_pending_max_bytes: int | None = Field(default=None, ge=1)
     pre_lm_max_batch_size: int | None = Field(default=None, ge=1)
     pre_lm_max_batch_wait_ms: int | None = Field(default=None, ge=0)
 
@@ -81,6 +84,9 @@ class Qwen3ASRPipelineConfig(PipelineConfig):
                 enable_pre_lm_encoder=True,
                 pre_lm_cache_max_entries=4096,
                 pre_lm_cache_size_bytes=2 * 1024**3,
+                pre_lm_cache_deferred_copy=False,
+                pre_lm_cache_pending_max_entries=8,
+                pre_lm_cache_pending_max_bytes=64 * 1024**2,
                 pre_lm_max_batch_size=8,
                 pre_lm_max_batch_wait_ms=0,
                 request_build_max_workers=8,

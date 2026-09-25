@@ -29,6 +29,7 @@ import torch
 from sglang.srt.managers.schedule_batch import MultimodalInputFormat
 from sglang.srt.utils import create_device_stream, device_stream_context
 
+from sglang_omni.models.qwen3_asr.deferred_cache import DeferredEmbeddingCache
 from sglang_omni.scheduling.pre_lm_encoder import PreLMEncoderService, QueueEntry
 from sglang_omni.scheduling.stage_cache import StageOutputCache
 
@@ -118,6 +119,9 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         cache_max_bytes: int = _CACHE_MAX_BYTES,
         max_batch_size: int = 8,
         max_batch_wait_ms: int = 0,
+        defer_cache_copy: bool = False,
+        cache_pending_max_entries: int | None = None,
+        cache_pending_max_bytes: int | None = None,
     ) -> None:
         self.model = model
         reference = next(model.audio_tower.parameters())
@@ -143,6 +147,21 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         self.lifecycle_lock = threading.Lock()
         self.closed = False
         self.inflight: dict[str, concurrent.futures.Future[torch.Tensor]] = {}
+        self.pending_cache: dict[str, concurrent.futures.Future[None]] = {}
+        self.deferred_cache: DeferredEmbeddingCache | None = None
+        if defer_cache_copy and self.device.type == "cuda":
+            if cache_pending_max_entries is None or cache_pending_max_bytes is None:
+                raise ValueError("Deferred cache copy requires both pending limits")
+            else:
+                pass
+            self.deferred_cache = DeferredEmbeddingCache(
+                self.cache,
+                device=self.device,
+                max_pending_entries=cache_pending_max_entries,
+                max_pending_bytes=cache_pending_max_bytes,
+            )
+        else:
+            pass
         self.hits = 0
         self.misses = 0
         self.merged = 0
@@ -156,15 +175,18 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         super().__init__(worker_name="qwen3-asr-audio-encode")
 
     def close(self) -> None:
-        """Stop the encoder worker after all queued requests finish."""
+        """Drain encoder requests before stopping cache publication."""
         with self.lifecycle_lock:
             if self.closed:
-                return
-            else:
                 pass
-            self.closed = True
-            self.queue.put(_SHUTDOWN)
-        self.thread.join(timeout=5)
+            else:
+                self.closed = True
+                self.queue.put(_SHUTDOWN)
+        self.thread.join()
+        if self.deferred_cache is not None:
+            self.deferred_cache.close()
+        else:
+            pass
 
     def enqueue(
         self,
@@ -186,6 +208,11 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
 
     def submit_item(self, item: Any) -> concurrent.futures.Future[torch.Tensor]:
         """Queue the item for LM-ready encoding and return its future."""
+        with self.lifecycle_lock:
+            if self.closed:
+                raise RuntimeError("Qwen3-ASR pre-LM encoder service is closed")
+            else:
+                pass
         expected_tokens = expected_audio_tokens(item)
         if expected_tokens is None:
             raise RuntimeError(
@@ -243,7 +270,6 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
             future.add_done_callback(
                 lambda done, cache_key=key: self.clear_inflight(cache_key, done)
             )
-            self.count_failed(future)
             try:
                 self.submit(item, future)
             except Exception as exc:
@@ -252,16 +278,25 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
                 else:
                     pass
                 raise
-            return future
+            follower_of = future
         else:
-            pass
-
-        item.feature = None
+            item.feature = None
         completion: concurrent.futures.Future[torch.Tensor] = (
             concurrent.futures.Future()
         )
 
         def attach_follower(done: concurrent.futures.Future[torch.Tensor]) -> None:
+            if not completion.set_running_or_notify_cancel():
+                return
+            else:
+                pass
+            failure = done.exception()
+            if failure is not None:
+                # note (Andrew Cheng): raising here reattaches the encoder's active OOM traceback.
+                completion.set_exception(failure)
+                return
+            else:
+                pass
             try:
                 embedding = done.result()
                 if not self.is_valid(embedding, expected_tokens):
@@ -310,8 +345,23 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
         future: concurrent.futures.Future[torch.Tensor],
     ) -> None:
         with self.lock:
-            if self.inflight.get(key) is future:
-                del self.inflight[key]
+            if self.inflight.get(key) is future and key not in self.pending_cache:
+                self.inflight.pop(key)
+            else:
+                pass
+
+    def finish_cache_publication(
+        self, key: str, publication: concurrent.futures.Future[None]
+    ) -> None:
+        with self.lock:
+            if self.pending_cache.get(key) is not publication:
+                return
+            else:
+                pass
+            self.pending_cache.pop(key)
+            future = self.inflight.get(key)
+            if future is not None and future.done():
+                self.inflight.pop(key)
             else:
                 pass
 
@@ -346,7 +396,7 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
     def stats(self) -> dict[str, int | float]:
         with self.lock:
             cache_lookups = self.hits + self.misses
-            return {
+            statistics: dict[str, int | float] = {
                 "hits": self.hits,
                 "misses": self.misses,
                 "merged": self.merged,
@@ -366,6 +416,11 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
                 "cache_bytes": self.cache.current_bytes,
                 "cache_evictions": self.cache.eviction_count,
             }
+        if self.deferred_cache is not None:
+            statistics.update(self.deferred_cache.stats())
+        else:
+            pass
+        return statistics
 
     def cache_key(self, item: Any) -> str | None:
         return self.cache_key_from_fingerprint(getattr(item, "audio_fingerprint", None))
@@ -503,10 +558,35 @@ class Qwen3ASRPreLMEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.T
     ) -> None:
         del host_copy
         key = self.cache_key(item)
-        if key is not None:
+        if key is None:
+            return
+        elif self.deferred_cache is None:
             self.cache.put(key, embedding)
         else:
-            pass
+            size_bytes = embedding.numel() * embedding.element_size()
+            if self.cache.max_size == 0 or (
+                self.cache.max_bytes is not None and size_bytes > self.cache.max_bytes
+            ):
+                return
+            elif size_bytes > self.deferred_cache.max_pending_bytes:
+                self.cache.put(key, embedding.to(device="cpu"))
+            else:
+                publication: concurrent.futures.Future[None] = (
+                    concurrent.futures.Future()
+                )
+                with self.lock:
+                    if key in self.pending_cache:
+                        return
+                    else:
+                        self.pending_cache[key] = publication
+                publication.add_done_callback(
+                    lambda done: self.finish_cache_publication(key, done)
+                )
+                try:
+                    self.deferred_cache.submit(key, embedding, publication)
+                except Exception as exc:
+                    publication.set_exception(exc)
+                    raise
 
     def retry_batch(self, batch: list[QueueEntry[Any]], _exc: Exception) -> bool:
         return len(batch) > 1
