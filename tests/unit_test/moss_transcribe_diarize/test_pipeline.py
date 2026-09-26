@@ -305,6 +305,7 @@ def stub_factory_env(monkeypatch: pytest.MonkeyPatch, *, want_cuda_graph: bool):
         "compile_encoder": [],
         "init_encoder_graphs": [],
         "encoder_services": [],
+        "encoder_closes": 0,
         "scheduler_kwargs": [],
     }
     model = SimpleNamespace(
@@ -367,9 +368,12 @@ def stub_factory_env(monkeypatch: pytest.MonkeyPatch, *, want_cuda_graph: bool):
     )
     monkeypatch.setattr(engine_builder, "init_mm_embedding_cache", lambda n: None)
 
+    def close_encoder_service() -> None:
+        calls["encoder_closes"] += 1
+
     def make_encoder_service(model, *, max_batch_size):
         calls["encoder_services"].append((model, max_batch_size))
-        return object()
+        return SimpleNamespace(close=close_encoder_service)
 
     monkeypatch.setattr(
         engine_builder, "BatchedAudioEncoderService", make_encoder_service
@@ -415,6 +419,30 @@ def test_factory_compiles_encoder_and_skips_cuda_graph_when_flag_on(
     assert scheduler_kwargs["prefill_coalesce_when_idle"] is True
     assert scheduler_kwargs["prefill_coalesce_requires_pending_builds"] is True
     assert scheduler_kwargs["prefill_coalesce_after_builds_during_decode"] is True
+    assert calls["encoder_closes"] == 0
+    scheduler_kwargs["shutdown_callback"]()
+    assert calls["encoder_closes"] == 1
+
+
+def test_factory_closes_encoder_service_when_scheduler_build_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sglang_omni.scheduling import omni_scheduler
+
+    calls = stub_factory_env(monkeypatch, want_cuda_graph=False)
+
+    def fail_scheduler(**kwargs):
+        raise RuntimeError("scheduler build failed")
+
+    monkeypatch.setattr(omni_scheduler, "OmniScheduler", fail_scheduler)
+
+    with pytest.raises(RuntimeError, match="scheduler build failed"):
+        create_sglang_moss_transcribe_diarize_executor(
+            "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+        )
+
+    assert len(calls["encoder_services"]) == 1
+    assert calls["encoder_closes"] == 1
 
 
 def test_factory_context_length_override_uses_final_server_value(

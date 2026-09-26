@@ -176,6 +176,21 @@ class MossTranscribeDiarizeEngineBuilder(AsrEngineBuilder):
             audio_encoder_service=self.audio_encoder_service,
         )
 
+    def extra_scheduler_callbacks(self) -> dict[str, Any]:
+        return {
+            "shutdown_callback": (
+                self.audio_encoder_service.close
+                if self.audio_encoder_service is not None
+                else None
+            )
+        }
+
+    def cleanup_build_failure(self) -> None:
+        if self.audio_encoder_service is not None:
+            self.audio_encoder_service.close()
+        else:
+            pass
+
     def extra_scheduler_kwargs(self) -> dict[str, Any]:
         return {
             "stream_output_builder": (
