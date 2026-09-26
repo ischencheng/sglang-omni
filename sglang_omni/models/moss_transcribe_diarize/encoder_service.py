@@ -7,9 +7,11 @@ compute-bound encoder overlap the memory-bound decode on the same GPU.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import logging
 import queue
+import threading
 import traceback
 from dataclasses import dataclass
 from typing import Any
@@ -53,27 +55,111 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
         )
         self.batch_count = 0
         self.item_count = 0
+        self.lock = threading.Lock()
+        self.lifecycle_lock = threading.Lock()
+        self.closed = False
+        self.inflight: dict[
+            tuple[str, int], concurrent.futures.Future[torch.Tensor]
+        ] = {}
         super().__init__(worker_name="moss-td-audio-encode")
+
+    def close(self) -> None:
+        """Reject new work and wait up to five seconds for the queue to drain."""
+        with self.lifecycle_lock:
+            if self.closed:
+                return
+            else:
+                pass
+            self.closed = True
+            self.queue.put(None)
+        self.thread.join(timeout=5)
+
+    def enqueue(
+        self,
+        item: Any,
+        future: concurrent.futures.Future[torch.Tensor],
+    ) -> None:
+        with self.lifecycle_lock:
+            if self.closed:
+                raise RuntimeError("MOSS-TD pre-LM encoder service is closed")
+            else:
+                pass
+            self.queue.put(QueueEntry(item=item, future=future))
 
     def encode_item(self, item: Any) -> None:
         """Blocks until item.precomputed_embeddings is attached."""
+        with self.lifecycle_lock:
+            if self.closed:
+                raise RuntimeError("MOSS-TD pre-LM encoder service is closed")
+            else:
+                pass
         feature_lengths = getattr(item, "audio_feature_lengths", None)
-        if feature_lengths is None:
+        key = self.cache_key(item)
+        if feature_lengths is None or key is None:
             future = self.submit(item)
             future.result(timeout=self.ENCODE_TIMEOUT_S)
             return
         else:
             pass
         expected_tokens = int(feature_lengths.sum())
-        key = self.cache_key(item)
         cached = self._lookup_cached_embedding(key, expected_tokens)
         if cached is not None:
             self.attach_embedding(item, cached)
             return
         else:
             pass
-        future = self.submit(item)
-        future.result(timeout=self.ENCODE_TIMEOUT_S)
+        inflight_key = (key, expected_tokens)
+        leader = False
+        with self.lock:
+            future = self.inflight.get(inflight_key)
+            if future is None or future.done():
+                cached = self._lookup_cached_embedding(key, expected_tokens)
+                if cached is None:
+                    future = concurrent.futures.Future()
+                    self.inflight[inflight_key] = future
+                    leader = True
+                else:
+                    pass
+            else:
+                pass
+        if cached is not None:
+            self.attach_embedding(item, cached)
+            return
+        else:
+            pass
+        if leader:
+            future.add_done_callback(
+                lambda done: self.clear_inflight(inflight_key, done)
+            )
+            try:
+                self.submit(item, future)
+            except Exception as exc:
+                self.set_exception(QueueEntry(item, future), exc)
+                raise
+        else:
+            pass
+        embedding = future.result(timeout=self.ENCODE_TIMEOUT_S)
+        if not leader:
+            if not self.is_valid(embedding, expected_tokens):
+                raise RuntimeError(
+                    "MOSS-TD pre-LM encoder returned an invalid embedding"
+                )
+            else:
+                pass
+            self.attach_embedding(item, embedding)
+        else:
+            pass
+
+    def clear_inflight(
+        self,
+        key: tuple[str, int],
+        future: concurrent.futures.Future[torch.Tensor],
+    ) -> None:
+        with self.lock:
+            if self.inflight.get(key) is future:
+                self.inflight.pop(key)
+            else:
+                pass
 
     def lookup_cached_embedding(
         self,
@@ -109,10 +195,6 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
 
     def cache_key(self, item: Any) -> str | None:
         fingerprint = getattr(item, "audio_fingerprint", None)
-        if fingerprint is None:
-            fingerprint = getattr(item, "hash", None)
-        else:
-            pass
         return None if fingerprint is None else str(fingerprint)
 
     def is_valid(self, embedding: Any, expected_tokens: int) -> bool:
@@ -124,7 +206,7 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
             and embedding.dtype == self.dtype
         )
 
-    def drain_batch(self) -> list[QueueEntry[Any]]:
+    def drain_batch(self) -> list[QueueEntry[Any] | None]:
         # note (yichi): never wait — a window costs 8~16ms at low concurrency, buys <=5ms at high.
         batch = [self.queue.get()]
         for _ in range(self.max_batch_size - 1):
@@ -135,7 +217,8 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
         return batch
 
     def next_batch(self) -> tuple[list[QueueEntry[Any]], bool]:
-        return self.drain_batch(), False
+        batch = self.drain_batch()
+        return [entry for entry in batch if entry is not None], None in batch
 
     def batch_context(self) -> contextlib.AbstractContextManager[Any]:
         return torch.cuda.stream(self.stream)
@@ -149,10 +232,11 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
         embedding: torch.Tensor,
     ) -> list[torch.Tensor]:
         token_counts = [int(item.audio_feature_lengths.sum()) for item in items]
-        if embedding.shape[0] != sum(token_counts):
+        if not self.is_valid(embedding, sum(token_counts)):
             raise RuntimeError(
-                f"encoder output rows {embedding.shape[0]} != expected "
-                f"{sum(token_counts)}"
+                f"encoder output shape={embedding.shape}, dtype={embedding.dtype}; "
+                f"expected shape=({sum(token_counts)}, {self.hidden_size}), "
+                f"dtype={self.dtype}"
             )
         else:
             pass
@@ -161,7 +245,13 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
         ]
 
     def attach_embedding(self, item: Any, embedding: torch.Tensor) -> None:
-        item.precomputed_embeddings = embedding.to(self.device, non_blocking=True)
+        # note (Andrew): callers share the completed embedding as read-only storage.
+        embedding = embedding.to(self.device, non_blocking=True)
+        if embedding.device.type == "cuda":
+            embedding.record_stream(torch.cuda.default_stream(embedding.device))
+        else:
+            pass
+        item.precomputed_embeddings = embedding
         item.feature = None
 
     def attach_before_synchronize(self) -> bool:
@@ -215,9 +305,6 @@ class BatchedAudioEncoderService(PreLMEncoderService[Any, torch.Tensor, torch.Te
 
     def retry_batch(self, batch: list[QueueEntry[Any]], _exc: Exception) -> bool:
         return len(batch) > 1
-
-    def future_result(self, _embedding: torch.Tensor) -> None:
-        return None
 
     def on_batch_finished(
         self,
